@@ -463,7 +463,7 @@ unsafe extern "C" fn clear_fp_registers() {
     )
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(
         include_asm_macros!(),
