@@ -21,6 +21,7 @@ jobs:
         toolchain: ${{ env.rust-toolchain }}
     - uses: Swatinem/rust-cache@v2
       with:
+        shared-key: cargo-bin-cache
         cache-targets: false
     - uses: ./.github/workflows/actions/setup-musl
       with:
