@@ -8,6 +8,9 @@ extern crate log;
 
 mod aspace;
 mod backend;
+#[cfg(feature = "cow")]
+mod frameinfo;
+mod page_iter_wrapper;
 
 pub use self::aspace::AddrSpace;
 pub use self::backend::Backend;
