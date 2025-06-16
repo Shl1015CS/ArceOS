@@ -341,7 +341,7 @@ impl TaskContext {
 }
 
 #[cfg(feature = "fp_simd")]
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn save_fp_registers(fp_status: &mut FpStatus) {
     naked_asm!(
         include_fp_asm_macros!(),
@@ -358,7 +358,7 @@ unsafe extern "C" fn save_fp_registers(fp_status: &mut FpStatus) {
 }
 
 #[cfg(feature = "fp_simd")]
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn restore_fp_registers(fp_status: &FpStatus) {
     naked_asm!(
         include_fp_asm_macros!(),
