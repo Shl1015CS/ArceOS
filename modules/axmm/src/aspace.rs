@@ -649,7 +649,9 @@ impl AddrSpace {
         align: PageSize,
         pt: &mut PageTable,
     ) -> bool {
-        assert!(flags.contains(MappingFlags::WRITE));
+        // here we shouldn't check if the page is writable,
+        // because other operations other than write can also cause COW,
+        // such as mprotect.
 
         let paddr = paddr.align_down(align);
 
