@@ -105,11 +105,16 @@ impl WaitQueue {
 
     /// Blocks the current task and put it into the wait queue, until other tasks
     /// notify it, or the given duration has elapsed.
+    /// `absolute` indicates whether the `dur` is an absolute time or a relative time.
     #[cfg(feature = "irq")]
-    pub fn wait_timeout(&self, dur: core::time::Duration) -> bool {
+    pub fn wait_timeout(&self, dur: core::time::Duration, absolute: bool) -> bool {
         let mut rq = current_run_queue::<NoPreemptIrqSave>();
         let curr = crate::current();
-        let deadline = axhal::time::wall_time() + dur;
+        let deadline = if absolute {
+            dur
+        } else {
+            axhal::time::wall_time() + dur
+        };
         debug!(
             "task wait_timeout: {} deadline={:?}",
             curr.id_name(),
