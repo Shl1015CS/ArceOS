@@ -31,10 +31,10 @@ kspin = "0.1"
 int_ratio = "0.1.1"
 lazyinit = "0.2"
 percpu = "0.2"
-memory_addr = "0.3"
+memory_addr.workspace = true
 handler_table = "0.1"
-page_table_entry = "0.5"
-page_table_multiarch = "0.5"
+page_table_entry = "0.5.3"
+page_table_multiarch = "0.5.3"
 axlog = { workspace = true }
 axconfig = { workspace = true }
 axalloc = { workspace = true, optional = true }
@@ -42,7 +42,7 @@ axalloc = { workspace = true, optional = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"
 x86_64 = "0.15"
-x2apic = "0.4"
+x2apic = "0.5"
 raw-cpuid = "11.5"
 x86_rtc = { version = "0.1", optional = true }
 
