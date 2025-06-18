@@ -1,5 +1,4 @@
 use crate::alloc::string::String;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use axerrno::AxError;

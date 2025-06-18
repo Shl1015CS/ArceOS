@@ -89,11 +89,12 @@ impl Backend {
         align: PageSize,
     ) -> bool {
         debug!(
-            "map_alloc: [{:#x}, {:#x}) {:?} (populate={})",
+            "map_alloc: [{:#x}, {:#x}) {:?} (populate={}, align={:?})",
             start,
             start + size,
             flags,
-            populate
+            populate,
+            align,
         );
         if populate {
             // allocate all possible physical frames for populated mapping.

@@ -109,7 +109,7 @@ impl AddrSpace {
     /// based on the current memory region layout, that satisfies the size and alignment requirements.
     ///
     /// # Parameters
-    /// - `hint`: Suggested starting address for the search (may be adjusted due to alignment or overlapping regions)
+    /// - `hint`: Suggested starting address for the search (maybe adjusted due to alignment or overlapping regions)
     /// - `size`: Size of the contiguous address space to allocate (in bytes)
     /// - `limit`: Boundary of the allowed address range (inclusive of start and end addresses)
     /// - `align`: Address alignment requirement (e.g., page alignment like 4KB/2MB)
