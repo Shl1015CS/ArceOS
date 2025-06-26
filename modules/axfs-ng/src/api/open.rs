@@ -2,7 +2,7 @@ use crate::api::{Directory, File, FsContext, resolve_path_existed};
 use axerrno::LinuxError;
 use lock_api::RawMutex;
 use undefined_vfs::path::Path;
-use undefined_vfs::types::{NodePermission, NodeType};
+use undefined_vfs::types::{MetadataUpdate, NodePermission, NodeType};
 use undefined_vfs::{VfsError, VfsResult};
 
 bitflags::bitflags! {
@@ -49,6 +49,7 @@ pub fn open<M: RawMutex>(
     context: &FsContext<M>,
     flags: FileFlags,
     create_mode: Option<u32>,
+    create_user: Option<(u32, u32)>,
 ) -> VfsResult<OpenResult<M>> {
     if !flags.validate() {
         return Err(VfsError::EINVAL);
@@ -64,6 +65,7 @@ pub fn open<M: RawMutex>(
         }
         location
     } else {
+        // 路径不存在，需要创建
         if !flags.contains(FileFlags::CREATE) {
             return Err(VfsError::ENOENT);
         }
@@ -73,7 +75,12 @@ pub fn open<M: RawMutex>(
         }
         let create_mode = create_mode.unwrap_or(0o666);
         let permission = NodePermission::from_bits_truncate((create_mode & !context.umask) as _);
-        location.create(file_path.as_str(), NodeType::RegularFile, permission)?
+        let location = location.create(file_path.as_str(), NodeType::RegularFile, permission)?;
+        location.update_metadata(MetadataUpdate {
+            owner: create_user,
+            ..Default::default()
+        })?;
+        location
     };
 
     if file.is_dir() && flags.contains(FileFlags::WRITE) {

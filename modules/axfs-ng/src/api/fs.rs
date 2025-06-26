@@ -5,6 +5,7 @@ use lock_api::RawMutex;
 use undefined_vfs::VfsResult;
 use undefined_vfs::mount::Location;
 use undefined_vfs::path::Path;
+use undefined_vfs::types::NodePermission;
 
 /// The default umask value for file creation.
 /// rwx, r-x, r-x
@@ -68,6 +69,10 @@ impl<M: RawMutex> FsContext<M> {
         let mut context = (*self).clone();
         context.change_dir(current_dir)?;
         Ok(context)
+    }
+
+    pub fn get_permissions(&self, mode: u32) -> NodePermission {
+        NodePermission::from_bits_truncate((mode & !self.umask) as u16)
     }
 
     pub fn read(&self, path: impl AsRef<Path>) -> VfsResult<Vec<u8>> {
