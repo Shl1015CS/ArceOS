@@ -109,15 +109,15 @@ pub fn lookup_followed<M: RawMutex>(
     name: &str,
     follow_count: &mut usize,
 ) -> VfsResult<Location<M>> {
-    let location = location.lookup_no_follow(name)?;
-    if location.node_type() != NodeType::Symlink {
-        return Ok(location);
+    let child = location.lookup_no_follow(name)?;
+    if child.node_type() != NodeType::Symlink {
+        return Ok(child);
     }
     if *follow_count >= SYMLINKS_MAX {
         return Err(VfsError::ELOOP);
     }
     *follow_count += 1;
-    let target = location.read_link()?;
+    let target = child.read_link()?;
     if target.is_empty() {
         return Err(VfsError::ENOENT);
     }
