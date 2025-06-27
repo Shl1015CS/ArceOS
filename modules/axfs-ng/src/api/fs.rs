@@ -83,4 +83,8 @@ impl<M: RawMutex> FsContext<M> {
         debug_assert!(length == buf.len());
         Ok(buf)
     }
+
+    pub fn resolve(&self, path: impl AsRef<Path>) -> VfsResult<Location<M>> {
+        resolve_path(self, path, &mut 0, false)
+    }
 }
