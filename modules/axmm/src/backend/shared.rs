@@ -58,7 +58,7 @@ impl Backend {
             flags
         );
         pt.map_region(start_va, va_to_pa, size, flags, true, false)
-            .map(|tlb| tlb.ignore()) // TLB flush on map is unnecessary, as there are no outdated mappings.
+            .map(|tlb| tlb.flush_all()) // TLB flush on map is unnecessary, as there are no outdated mappings.
             .is_ok()
     }
 
