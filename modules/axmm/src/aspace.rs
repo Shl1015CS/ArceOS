@@ -202,6 +202,23 @@ impl AddrSpace {
         Ok(())
     }
 
+    pub fn map_shared(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        zeroed: bool,
+        align: PageSize,
+    ) -> AxResult {
+        self.validate_region(start, size, align)?;
+        let backend = Backend::new_shared(size, zeroed, align).ok_or(AxError::NoMemory)?;
+        let area = MemoryArea::new(start, size, flags, backend);
+        self.areas
+            .map(area, &mut self.pt, false)
+            .map_err(mapping_err_to_ax_err)?;
+        Ok(())
+    }
+
     /// Ensures that the specified virtual memory region is fully mapped.
     ///
     /// This function walks through the given virtual address range and attempts to ensure
@@ -322,6 +339,7 @@ impl AddrSpace {
                     pa_va_offset: _,
                     align,
                 } => align,
+                Backend::Shared { align, .. } => align,
             };
 
             let unmap_start = start.max(area.start());
@@ -564,6 +582,7 @@ impl AddrSpace {
                 Backend::Alloc { align, .. } => *align,
                 // Linear-backed regions are usually allocated by the kernel and are shared
                 Backend::Linear { .. } => continue,
+                Backend::Shared { .. } => continue,
             };
 
             #[cfg(feature = "cow")]

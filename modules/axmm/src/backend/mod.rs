@@ -1,11 +1,14 @@
 //! Memory mapping backends.
 
+use ::alloc::sync::Arc;
 use axhal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::VirtAddr;
 use memory_set::MappingBackend;
 mod alloc;
 mod linear;
+mod shared;
 
+use crate::backend::shared::SharedFrame;
 #[allow(unused_imports)]
 pub(crate) use alloc::{alloc_frame, dealloc_frame};
 
@@ -19,6 +22,10 @@ pub(crate) use alloc::{alloc_frame, dealloc_frame};
 ///   frames are obtained from the global allocator.
 #[derive(Clone)]
 pub enum Backend {
+    Shared {
+        shared_frame: Arc<SharedFrame>,
+        align: PageSize,
+    },
     /// Linear mapping backend.
     ///
     /// The offset between the virtual address and the physical address is
@@ -49,19 +56,23 @@ impl MappingBackend for Backend {
     type Flags = MappingFlags;
     type PageTable = PageTable;
     fn map(&self, start: VirtAddr, size: usize, flags: MappingFlags, pt: &mut PageTable) -> bool {
-        match *self {
+        match self {
+            Self::Shared { shared_frame, .. } => {
+                Self::map_shared(start, size, flags, pt, VirtAddr::from(shared_frame.vaddr))
+            }
             Self::Linear {
                 pa_va_offset,
                 align: _,
-            } => Self::map_linear(start, size, flags, pt, pa_va_offset),
+            } => Self::map_linear(start, size, flags, pt, *pa_va_offset),
             Self::Alloc { populate, align } => {
-                Self::map_alloc(start, size, flags, pt, populate, align)
+                Self::map_alloc(start, size, flags, pt, *populate, *align)
             }
         }
     }
 
     fn unmap(&self, start: VirtAddr, size: usize, pt: &mut PageTable) -> bool {
         match *self {
+            Self::Shared { .. } => Self::unmap_shared(start, size, pt),
             Self::Linear {
                 pa_va_offset,
                 align: _,
@@ -92,6 +103,7 @@ impl Backend {
         page_table: &mut PageTable,
     ) -> bool {
         match *self {
+            Self::Shared { .. } => false,
             Self::Linear { .. } => false, // Linear mappings should not trigger page faults.
             Self::Alloc { populate, align } => {
                 Self::handle_page_fault_alloc(vaddr, orig_flags, page_table, populate, align)
