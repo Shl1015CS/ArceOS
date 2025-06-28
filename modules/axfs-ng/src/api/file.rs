@@ -50,17 +50,12 @@ impl<M: RawMutex> File<M> {
             SeekFrom::Start(pos) => pos,
             SeekFrom::End(off) => {
                 let size = self.location.size()?;
-                size.checked_add_signed(off)
-                    .ok_or(VfsError::EINVAL)?
-                    .clamp(0, size)
+                size.checked_add_signed(off).ok_or(VfsError::EINVAL)?
             }
-            SeekFrom::Current(off) => {
-                let size = self.location.size()?;
-                self.position
-                    .checked_add_signed(off)
-                    .ok_or(VfsError::EINVAL)?
-                    .clamp(0, size)
-            }
+            SeekFrom::Current(off) => self
+                .position
+                .checked_add_signed(off)
+                .ok_or(VfsError::EINVAL)?,
         };
         // File under append mode is seekable, but `write` operations
         // will ignore it and always write at the end.
