@@ -1,20 +1,23 @@
-use core::net::SocketAddr;
+//! UDP Socket 实现
+
 use core::sync::atomic::{AtomicBool, Ordering};
-
-use axerrno::{ax_err, ax_err_type, AxError, AxResult};
-use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
-use axsync::Mutex;
-use spin::RwLock;
-
+use axsync::RwLock;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::udp::{self, BindError, SendError};
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
-use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
-use super::{SocketSetWrapper, SOCKET_SET};
+use crate::error::{NetError, NetResult};
+use crate::stack::{SocketAddr, addr_utils::*};
+use super::{network_stack, socket_set::SocketSetManager};
 
-/// A UDP socket that provides POSIX-like APIs.
+/// UDP Socket 实现
+/// 
+/// 提供 POSIX 风格的 UDP socket API，支持：
+/// - 数据报传输：`send_to`, `recv_from`
+/// - 连接模式：`connect`, `send`, `recv`
+/// - 地址绑定：`bind`
+/// - 非阻塞模式和地址重用
 pub struct UdpSocket {
     handle: SocketHandle,
     local_addr: RwLock<Option<IpEndpoint>>,
@@ -24,11 +27,11 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
-    /// Creates a new UDP socket.
-    #[allow(clippy::new_without_default)]
+    /// 创建新的 UDP socket
     pub fn new() -> Self {
-        let socket = SocketSetWrapper::new_udp_socket();
-        let handle = SOCKET_SET.add(socket);
+        let socket = SocketSetManager::new_udp_socket();
+        let handle = network_stack().socket_set().add(socket);
+        
         Self {
             handle,
             local_addr: RwLock::new(None),
@@ -38,340 +41,309 @@ impl UdpSocket {
         }
     }
 
-    /// Returns the local address and port, or
-    /// [`Err(NotConnected)`](AxError::NotConnected) if not connected.
-    pub fn local_addr(&self) -> AxResult<SocketAddr> {
-        match self.local_addr.try_read() {
-            Some(addr) => addr.map(into_core_sockaddr).ok_or(AxError::NotConnected),
-            None => Err(AxError::NotConnected),
-        }
+    /// 获取本地地址和端口
+    pub fn local_addr(&self) -> NetResult<SocketAddr> {
+        self.local_addr
+            .read()
+            .as_ref()
+            .map(|&addr| to_std_socket_addr(addr))
+            .ok_or(NetError::NotConnected)
     }
 
-    /// Returns the remote address and port, or
-    /// [`Err(NotConnected)`](AxError::NotConnected) if not connected.
-    pub fn peer_addr(&self) -> AxResult<SocketAddr> {
-        self.remote_endpoint().map(into_core_sockaddr)
+    /// 获取远程地址和端口
+    pub fn peer_addr(&self) -> NetResult<SocketAddr> {
+        self.remote_endpoint().map(to_std_socket_addr)
     }
 
-    /// Returns whether this socket is in nonblocking mode.
-    #[inline]
+    /// 检查是否为非阻塞模式
     pub fn is_nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Acquire)
     }
 
-    /// Moves this UDP socket into or out of nonblocking mode.
-    ///
-    /// This will result in `recv`, `recv_from`, `send`, and `send_to`
-    /// operations becoming nonblocking, i.e., immediately returning from their
-    /// calls. If the IO operation is successful, `Ok` is returned and no
-    /// further action is required. If the IO operation could not be completed
-    /// and needs to be retried, an error with kind
-    /// [`Err(WouldBlock)`](AxError::WouldBlock) is returned.
-    #[inline]
+    /// 设置非阻塞模式
     pub fn set_nonblocking(&self, nonblocking: bool) {
         self.nonblock.store(nonblocking, Ordering::Release);
     }
 
-    /// Set the TTL (time-to-live) option for this socket.
-    ///
-    /// The TTL is the number of hops that a packet is allowed to live.
-    pub fn set_socket_ttl(&self, ttl: u8) {
-        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-            socket.set_hop_limit(Some(ttl))
-        });
-    }
-
-    /// Returns whether this socket is in reuse address mode.
-    #[inline]
+    /// 检查是否启用地址重用
     pub fn is_reuse_addr(&self) -> bool {
         self.reuse_addr.load(Ordering::Acquire)
     }
 
-    /// Moves this UDP socket into or out of reuse address mode.
-    ///
-    /// When a socket is bound, the `SO_REUSEADDR` option allows multiple sockets to be bound to the
-    /// same address if they are bound to different local addresses. This option must be set before
-    /// calling `bind`.
-    #[inline]
+    /// 设置地址重用
     pub fn set_reuse_addr(&self, reuse_addr: bool) {
         self.reuse_addr.store(reuse_addr, Ordering::Release);
     }
 
-    /// Binds an unbound socket to the given address and port.
-    ///
-    /// It's must be called before [`send_to`](Self::send_to) and
-    /// [`recv_from`](Self::recv_from).
-    pub fn bind(&self, mut local_addr: SocketAddr) -> AxResult {
+    /// 设置 TTL (生存时间)
+    pub fn set_ttl(&self, ttl: u8) {
+        network_stack()
+            .socket_set()
+            .with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+                socket.set_hop_limit(Some(ttl))
+            });
+    }
+
+    /// 绑定到本地地址
+    pub fn bind(&self, mut local_addr: SocketAddr) -> NetResult<()> {
         let mut self_local_addr = self.local_addr.write();
 
-        if local_addr.port() == 0 {
-            local_addr.set_port(get_ephemeral_port()?);
-        }
         if self_local_addr.is_some() {
-            return ax_err!(InvalidInput, "socket bind() failed: already bound");
+            return Err(NetError::AlreadyConnected);
         }
 
-        let local_endpoint = from_core_sockaddr(local_addr);
-        let endpoint = IpListenEndpoint {
-            addr: (!is_unspecified(local_endpoint.addr)).then_some(local_endpoint.addr),
+        if local_addr.port() == 0 {
+            local_addr.set_port(self.get_ephemeral_port()?);
+        }
+
+        let local_endpoint = from_std_socket_addr(local_addr);
+        let listen_endpoint = IpListenEndpoint {
+            addr: if !is_unspecified(local_endpoint.addr) {
+                Some(local_endpoint.addr)
+            } else {
+                None
+            },
             port: local_endpoint.port,
         };
 
+        // 检查地址冲突
         if !self.is_reuse_addr() {
-            // Check if the address is already in use
-            SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port)?;
+            network_stack()
+                .socket_set()
+                .check_bind_conflict(local_endpoint.addr, local_endpoint.port)?;
         }
 
-        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-            socket.bind(endpoint).or_else(|e| match e {
-                BindError::InvalidState => ax_err!(AlreadyExists, "socket bind() failed"),
-                BindError::Unaddressable => ax_err!(InvalidInput, "socket bind() failed"),
-            })
-        })?;
+        network_stack()
+            .socket_set()
+            .with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+                socket.bind(listen_endpoint).map_err(|e| match e {
+                    BindError::InvalidState => NetError::AlreadyConnected,
+                    BindError::Unaddressable => NetError::InvalidInput,
+                })
+            })?;
 
         *self_local_addr = Some(local_endpoint);
-        debug!("UDP socket {}: bound on {}", self.handle, endpoint);
+        debug!("UDP socket {}: 绑定到 {}", self.handle, listen_endpoint);
         Ok(())
     }
 
-    /// Sends data on the socket to the given address. On success, returns the
-    /// number of bytes written.
-    pub fn send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> AxResult<usize> {
-        if remote_addr.port() == 0 || remote_addr.ip().is_unspecified() {
-            return ax_err!(InvalidInput, "socket send_to() failed: invalid address");
-        }
-        self.send_impl(buf, from_core_sockaddr(remote_addr))
-    }
-
-    /// Receives a single datagram message on the socket. On success, returns
-    /// the number of bytes read and the origin.
-    pub fn recv_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
-        self.recv_impl(|socket| match socket.recv_slice(buf) {
-            Ok((len, meta)) => Ok((len, into_core_sockaddr(meta.endpoint))),
-            Err(_) => ax_err!(BadState, "socket recv_from() failed"),
-        })
-    }
-
-    /// Receives data from the socket, stores it in the given buffer.
-    ///
-    /// It will return [`Err(Timeout)`](AxError::Timeout) if expired.
-    pub fn recv_from_timeout(&self, buf: &mut [u8], ticks: u64) -> AxResult<(usize, SocketAddr)> {
-        let expire_at = current_ticks() + ticks;
-        self.recv_impl(|socket| match socket.recv_slice(buf) {
-            Ok((len, meta)) => Ok((len, into_core_sockaddr(meta.endpoint))),
-            Err(_) => {
-                if current_ticks() > expire_at {
-                    // TODO:timeout
-                    Err(AxError::Unsupported)
-                } else {
-                    Err(AxError::WouldBlock)
-                }
-            }
-        })
-    }
-
-    /// Receives a single datagram message on the socket, without removing it from
-    /// the queue. On success, returns the number of bytes read and the origin.
-    pub fn peek_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
-        self.recv_impl(|socket| match socket.peek_slice(buf) {
-            Ok((len, meta)) => Ok((len, into_core_sockaddr(meta.endpoint))),
-            Err(_) => ax_err!(BadState, "socket recv_from() failed"),
-        })
-    }
-
-    /// Connects this UDP socket to a remote address, allowing the `send` and
-    /// `recv` to be used to send data and also applies filters to only receive
-    /// data from the specified address.
-    ///
-    /// The local port will be generated automatically if the socket is not bound.
-    /// It's must be called before [`send`](Self::send) and
-    /// [`recv`](Self::recv).
-    pub fn connect(&self, addr: SocketAddr) -> AxResult {
+    /// 连接到远程地址
+    pub fn connect(&self, remote_addr: SocketAddr) -> NetResult<()> {
         let mut self_peer_addr = self.peer_addr.write();
 
+        // 如果未绑定，自动绑定到未指定地址
         if self.local_addr.read().is_none() {
-            self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
+            self.bind(to_std_socket_addr(UNSPECIFIED_ENDPOINT))?;
         }
 
-        *self_peer_addr = Some(from_core_sockaddr(addr));
-        debug!("UDP socket {}: connected to {}", self.handle, addr);
+        *self_peer_addr = Some(from_std_socket_addr(remote_addr));
+        debug!("UDP socket {}: 连接到 {}", self.handle, remote_addr);
         Ok(())
     }
 
-    /// Sends data on the socket to the remote address to which it is connected.
-    pub fn send(&self, buf: &[u8]) -> AxResult<usize> {
+    /// 发送数据到指定地址
+    pub fn send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> NetResult<usize> {
+        if remote_addr.port() == 0 || remote_addr.ip().is_unspecified() {
+            return Err(NetError::InvalidInput);
+        }
+        
+        self.send_impl(buf, from_std_socket_addr(remote_addr))
+    }
+
+    /// 从 socket 接收数据，返回数据长度和发送方地址
+    pub fn recv_from(&self, buf: &mut [u8]) -> NetResult<(usize, SocketAddr)> {
+        self.recv_impl(|socket| {
+            socket
+                .recv_slice(buf)
+                .map(|(len, meta)| (len, to_std_socket_addr(meta.endpoint)))
+                .map_err(|_| NetError::Internal)
+        })
+    }
+
+    /// 窥视数据（不移除）
+    pub fn peek_from(&self, buf: &mut [u8]) -> NetResult<(usize, SocketAddr)> {
+        self.recv_impl(|socket| {
+            socket
+                .peek_slice(buf)
+                .map(|(len, meta)| (len, to_std_socket_addr(meta.endpoint)))
+                .map_err(|_| NetError::Internal)
+        })
+    }
+
+    /// 发送数据到已连接的远程地址
+    pub fn send(&self, buf: &[u8]) -> NetResult<usize> {
         let remote_endpoint = self.remote_endpoint()?;
         self.send_impl(buf, remote_endpoint)
     }
 
-    /// Receives a single datagram message on the socket from the remote address
-    /// to which it is connected. On success, returns the number of bytes read.
-    pub fn recv(&self, buf: &mut [u8]) -> AxResult<usize> {
+    /// 从已连接的远程地址接收数据
+    pub fn recv(&self, buf: &mut [u8]) -> NetResult<usize> {
         let remote_endpoint = self.remote_endpoint()?;
         self.recv_impl(|socket| {
             let (len, meta) = socket
                 .recv_slice(buf)
-                .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
-            if !is_unspecified(remote_endpoint.addr) && remote_endpoint.addr != meta.endpoint.addr {
-                return Err(AxError::WouldBlock);
+                .map_err(|_| NetError::Internal)?;
+            
+            // 检查是否来自连接的远程地址
+            if !is_unspecified(remote_endpoint.addr) 
+                && remote_endpoint.addr != meta.endpoint.addr {
+                return Err(NetError::WouldBlock);
             }
             if remote_endpoint.port != 0 && remote_endpoint.port != meta.endpoint.port {
-                return Err(AxError::WouldBlock);
+                return Err(NetError::WouldBlock);
             }
+            
             Ok(len)
         })
     }
 
-    /// Close the socket.
-    pub fn shutdown(&self) -> AxResult {
-        SOCKET_SET.poll_interfaces();
-        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-            debug!("UDP socket {}: shutting down", self.handle);
-            socket.close();
-        });
+    /// 关闭 socket
+    pub fn shutdown(&self) -> NetResult<()> {
+        network_stack().poll_interfaces();
+        network_stack()
+            .socket_set()
+            .with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+                debug!("UDP socket {}: 关闭", self.handle);
+                socket.close();
+            });
         Ok(())
     }
 
-    /// Whether the socket is readable or writable.
-    pub fn poll(&self) -> AxResult<PollState> {
+    /// 轮询 socket 状态
+    pub fn poll(&self) -> NetResult<PollState> {
         if self.local_addr.read().is_none() {
             return Ok(PollState {
                 readable: false,
                 writable: false,
             });
         }
-        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-            Ok(PollState {
-                readable: socket.can_recv(),
-                writable: socket.can_send(),
+        
+        network_stack()
+            .socket_set()
+            .with_socket::<udp::Socket, _, _>(self.handle, |socket| {
+                Ok(PollState {
+                    readable: socket.can_recv(),
+                    writable: socket.can_send(),
+                })
             })
-        })
+    }
+
+    /// 使用 socket 执行操作（只读）
+    pub fn with_socket<R>(&self, f: impl FnOnce(&udp::Socket) -> R) -> R {
+        network_stack().socket_set().with_socket(self.handle, f)
+    }
+
+    /// 使用 socket 执行操作（可变）
+    pub fn with_socket_mut<R>(&self, f: impl FnOnce(&mut udp::Socket) -> R) -> R {
+        network_stack().socket_set().with_socket_mut(self.handle, f)
     }
 }
 
-/// Private methods
+// 私有方法实现
 impl UdpSocket {
-    fn remote_endpoint(&self) -> AxResult<IpEndpoint> {
-        match self.peer_addr.try_read() {
-            Some(addr) => addr.ok_or(AxError::NotConnected),
-            None => Err(AxError::NotConnected),
-        }
+    fn remote_endpoint(&self) -> NetResult<IpEndpoint> {
+        self.peer_addr
+            .read()
+            .as_ref()
+            .copied()
+            .ok_or(NetError::NotConnected)
     }
 
-    fn send_impl(&self, buf: &[u8], remote_endpoint: IpEndpoint) -> AxResult<usize> {
+    fn get_ephemeral_port(&self) -> NetResult<u16> {
+        use crate::stack::PortManager;
+        static PORT_MANAGER: PortManager = PortManager::new();
+        
+        // UDP 端口分配比较简单，不需要检查监听表
+        Ok(PORT_MANAGER.next_ephemeral_port())
+    }
+
+    fn send_impl(&self, buf: &[u8], remote_endpoint: IpEndpoint) -> NetResult<usize> {
         if self.local_addr.read().is_none() {
-            return ax_err!(NotConnected, "socket send() failed");
+            return Err(NetError::NotConnected);
         }
-        // info!("send to addr: {:?}", remote_endpoint);
+
         self.block_on(|| {
-            SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-                if !socket.is_open() {
-                    // not connected
-                    ax_err!(NotConnected, "socket send() failed")
-                } else if socket.can_send() {
-                    socket
-                        .send_slice(buf, remote_endpoint)
-                        .map_err(|e| match e {
-                            SendError::BufferFull => AxError::WouldBlock,
-                            SendError::Unaddressable => {
-                                ax_err_type!(ConnectionRefused, "socket send() failed")
-                            }
-                        })?;
-                    Ok(buf.len())
-                } else {
-                    // tx buffer is full
-                    Err(AxError::WouldBlock)
-                }
-            })
+            network_stack()
+                .socket_set()
+                .with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+                    if !socket.is_open() {
+                        Err(NetError::NotConnected)
+                    } else if socket.can_send() {
+                        socket
+                            .send_slice(buf, remote_endpoint)
+                            .map_err(|e| match e {
+                                SendError::BufferFull => NetError::WouldBlock,
+                                SendError::Unaddressable => NetError::HostUnreachable,
+                            })?;
+                        Ok(buf.len())
+                    } else {
+                        Err(NetError::WouldBlock)
+                    }
+                })
         })
     }
 
-    fn recv_impl<F, T>(&self, mut op: F) -> AxResult<T>
+    fn recv_impl<F, T>(&self, mut op: F) -> NetResult<T>
     where
-        F: FnMut(&mut udp::Socket) -> AxResult<T>,
+        F: FnMut(&mut udp::Socket) -> NetResult<T>,
     {
         if self.local_addr.read().is_none() {
-            return ax_err!(NotConnected, "socket send() failed");
+            return Err(NetError::NotConnected);
         }
 
         self.block_on(|| {
-            SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-                if !socket.is_open() {
-                    // not bound
-                    ax_err!(NotConnected, "socket recv() failed")
-                } else if socket.can_recv() {
-                    // data available
-                    op(socket)
-                } else {
-                    // no more data
-                    Err(AxError::WouldBlock)
-                }
-            })
+            network_stack()
+                .socket_set()
+                .with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+                    if !socket.is_open() {
+                        Err(NetError::NotConnected)
+                    } else if socket.can_recv() {
+                        op(socket)
+                    } else {
+                        Err(NetError::WouldBlock)
+                    }
+                })
         })
     }
 
-    fn block_on<F, T>(&self, mut f: F) -> AxResult<T>
+    fn block_on<F, T>(&self, mut f: F) -> NetResult<T>
     where
-        F: FnMut() -> AxResult<T>,
+        F: FnMut() -> NetResult<T>,
     {
         if self.is_nonblocking() {
             f()
         } else {
             loop {
-                SOCKET_SET.poll_interfaces();
+                network_stack().poll_interfaces();
                 match f() {
                     Ok(t) => return Ok(t),
-                    Err(AxError::WouldBlock) => axtask::yield_now(),
+                    Err(NetError::WouldBlock) => axtask::yield_now(),
                     Err(e) => return Err(e),
                 }
             }
         }
     }
-
-    /// To get the socket and call the given function.
-    ///
-    /// If the socket is not connected, it will return None.
-    ///
-    /// Or it will return the result of the given function.
-    pub fn with_socket<R>(&self, f: impl FnOnce(&udp::Socket) -> R) -> R {
-        SOCKET_SET.with_socket(self.handle, |s| f(s))
-    }
 }
 
 impl Read for UdpSocket {
-    fn read(&mut self, buf: &mut [u8]) -> AxResult<usize> {
-        self.recv(buf)
+    fn read(&mut self, buf: &mut [u8]) -> axerrno::AxResult<usize> {
+        self.recv(buf).map_err(|e| e.into())
     }
 }
 
 impl Write for UdpSocket {
-    fn write(&mut self, buf: &[u8]) -> AxResult<usize> {
-        self.send(buf)
+    fn write(&mut self, buf: &[u8]) -> axerrno::AxResult<usize> {
+        self.send(buf).map_err(|e| e.into())
     }
 
-    fn flush(&mut self) -> AxResult {
-        Err(AxError::Unsupported)
+    fn flush(&mut self) -> axerrno::AxResult {
+        Ok(()) // UDP 无需刷新
     }
 }
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        self.shutdown().ok();
-        SOCKET_SET.remove(self.handle);
+        let _ = self.shutdown();
+        network_stack().socket_set().remove(self.handle);
     }
-}
-
-fn get_ephemeral_port() -> AxResult<u16> {
-    const PORT_START: u16 = 0xc000;
-    const PORT_END: u16 = 0xffff;
-    static CURR: Mutex<u16> = Mutex::new(PORT_START);
-    let mut curr = CURR.lock();
-
-    let port = *curr;
-    if *curr == PORT_END {
-        *curr = PORT_START;
-    } else {
-        *curr += 1;
-    }
-    Ok(port)
 }

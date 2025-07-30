@@ -33,5 +33,4 @@ pub mod ctypes;
 pub use imp::sys::*;
 pub use imp::time::*;
 
-#[cfg(feature = "net")]
-pub use imp::net::*;
+

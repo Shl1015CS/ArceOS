@@ -1,164 +1,213 @@
-use alloc::{boxed::Box, collections::VecDeque};
-use core::ops::{Deref, DerefMut};
+//! TCP监听表管理
+//!
+//! 管理TCP服务端的监听端口和连接队列
 
-use axerrno::{ax_err, AxError, AxResult};
+use alloc::collections::{BTreeMap, VecDeque};
 use axsync::Mutex;
-use smoltcp::iface::{SocketHandle, SocketSet};
-use smoltcp::socket::tcp::{self, State};
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
+use smoltcp::iface::SocketHandle;
+use smoltcp::socket::tcp;
+use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
-use super::{SocketSetWrapper, LISTEN_QUEUE_SIZE, SOCKET_SET};
+use crate::error::{NetError, NetResult};
+use super::{network_stack, socket_set::SocketSetManager};
 
-const PORT_NUM: usize = 65536;
-
-struct ListenTableEntry {
-    listen_endpoint: IpListenEndpoint,
-    syn_queue: VecDeque<SocketHandle>,
-}
-
-impl ListenTableEntry {
-    pub fn new(listen_endpoint: IpListenEndpoint) -> Self {
-        Self {
-            listen_endpoint,
-            syn_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
-        }
-    }
-
-    #[inline]
-    fn can_accept(&self, dst: IpAddress) -> bool {
-        match self.listen_endpoint.addr {
-            Some(addr) => addr == dst,
-            None => true,
-        }
-    }
-}
-
-impl Drop for ListenTableEntry {
-    fn drop(&mut self) {
-        for &handle in &self.syn_queue {
-            SOCKET_SET.remove(handle);
-        }
-    }
-}
-
+/// TCP监听表
 pub struct ListenTable {
-    tcp: Box<[Mutex<Option<Box<ListenTableEntry>>>]>,
+    listeners: Mutex<BTreeMap<u16, ListenerInfo>>,
+}
+
+/// 监听器信息
+struct ListenerInfo {
+    endpoint: IpListenEndpoint,
+    accept_queue: VecDeque<(SocketHandle, (IpEndpoint, IpEndpoint))>,
+    backlog: usize,
 }
 
 impl ListenTable {
+    /// 创建新的监听表
     pub fn new() -> Self {
-        let tcp = unsafe {
-            let mut buf = Box::new_uninit_slice(PORT_NUM);
-            for i in 0..PORT_NUM {
-                buf[i].write(Mutex::new(None));
+        Self {
+            listeners: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// 开始监听指定端点
+    pub fn listen(&self, endpoint: IpListenEndpoint) -> NetResult<()> {
+        let mut listeners = self.listeners.lock();
+        
+        if listeners.contains_key(&endpoint.port) {
+            return Err(NetError::AddrInUse);
+        }
+
+        listeners.insert(
+            endpoint.port,
+            ListenerInfo {
+                endpoint,
+                accept_queue: VecDeque::new(),
+                backlog: 128, // 默认backlog
+            },
+        );
+
+        debug!("开始监听端口 {}", endpoint.port);
+        Ok(())
+    }
+
+    /// 停止监听指定端口
+    pub fn unlisten(&self, port: u16) {
+        let mut listeners = self.listeners.lock();
+        if let Some(info) = listeners.remove(&port) {
+            // 清理accept队列中的socket
+            for (handle, _) in info.accept_queue {
+                network_stack().socket_set().remove(handle);
             }
-            buf.assume_init()
-        };
-        Self { tcp }
+            debug!("停止监听端口 {}", port);
+        }
     }
 
+    /// 检查是否可以监听指定端口
     pub fn can_listen(&self, port: u16) -> bool {
-        self.tcp[port as usize].lock().is_none()
+        !self.listeners.lock().contains_key(&port)
     }
 
-    pub fn listen(&self, listen_endpoint: IpListenEndpoint) -> AxResult {
-        let port = listen_endpoint.port;
-        assert_ne!(port, 0);
-        let mut entry = self.tcp[port as usize].lock();
-        if entry.is_none() {
-            *entry = Some(Box::new(ListenTableEntry::new(listen_endpoint)));
+    /// 检查是否有待接受的连接
+    pub fn can_accept(&self, port: u16) -> NetResult<bool> {
+        let listeners = self.listeners.lock();
+        if let Some(info) = listeners.get(&port) {
+            Ok(!info.accept_queue.is_empty())
+        } else {
+            Err(NetError::NotConnected)
+        }
+    }
+
+    /// 接受新连接
+    pub fn accept(&self, port: u16) -> NetResult<(SocketHandle, (IpEndpoint, IpEndpoint))> {
+        let mut listeners = self.listeners.lock();
+        if let Some(info) = listeners.get_mut(&port) {
+            if let Some(connection) = info.accept_queue.pop_front() {
+                debug!("接受连接: {:?}", connection.1);
+                Ok(connection)
+            } else {
+                Err(NetError::WouldBlock)
+            }
+        } else {
+            Err(NetError::NotConnected)
+        }
+    }
+
+    /// 处理新的连接请求
+    pub fn handle_new_connection(
+        &self,
+        local_port: u16,
+        handle: SocketHandle,
+        local_addr: IpEndpoint,
+        peer_addr: IpEndpoint,
+    ) -> NetResult<()> {
+        let mut listeners = self.listeners.lock();
+        if let Some(info) = listeners.get_mut(&local_port) {
+            if info.accept_queue.len() < info.backlog {
+                info.accept_queue.push_back((handle, (local_addr, peer_addr)));
+                debug!("新连接加入队列: {} -> {}", peer_addr, local_addr);
+                Ok(())
+            } else {
+                // 队列已满，拒绝连接
+                network_stack().socket_set().remove(handle);
+                Err(NetError::ConnectionRefused)
+            }
+        } else {
+            // 没有监听器，拒绝连接
+            network_stack().socket_set().remove(handle);
+            Err(NetError::ConnectionRefused)
+        }
+    }
+
+    /// 设置监听器的backlog
+    pub fn set_backlog(&self, port: u16, backlog: usize) -> NetResult<()> {
+        let mut listeners = self.listeners.lock();
+        if let Some(info) = listeners.get_mut(&port) {
+            info.backlog = backlog;
             Ok(())
         } else {
-            ax_err!(AddrInUse, "socket listen() failed")
+            Err(NetError::NotConnected)
         }
     }
 
-    pub fn unlisten(&self, port: u16) {
-        debug!("TCP socket unlisten on {}", port);
-        *self.tcp[port as usize].lock() = None;
+    /// 获取活跃连接数
+    pub fn active_connections(&self) -> usize {
+        self.listeners
+            .lock()
+            .values()
+            .map(|info| info.accept_queue.len())
+            .sum()
     }
 
-    pub fn can_accept(&self, port: u16) -> AxResult<bool> {
-        if let Some(entry) = self.tcp[port as usize].lock().deref() {
-            Ok(entry.syn_queue.iter().any(|&handle| is_connected(handle)))
-        } else {
-            ax_err!(InvalidInput, "socket accept() failed: not listen")
+    /// 获取监听端口列表
+    pub fn listening_ports(&self) -> Vec<u16> {
+        self.listeners.lock().keys().copied().collect()
+    }
+
+    /// 清理过期的连接
+    pub fn cleanup_expired_connections(&self) {
+        let mut listeners = self.listeners.lock();
+        for info in listeners.values_mut() {
+            let mut to_remove = Vec::new();
+            
+            for (i, &(handle, _)) in info.accept_queue.iter().enumerate() {
+                // 检查socket是否仍然有效
+                let is_valid = network_stack()
+                    .socket_set()
+                    .with_socket::<tcp::Socket, _, _>(handle, |socket| socket.is_active());
+                
+                if !is_valid {
+                    to_remove.push(i);
+                }
+            }
+            
+            // 从后往前移除，避免索引变化
+            for &i in to_remove.iter().rev() {
+                if let Some((handle, _)) = info.accept_queue.remove(i) {
+                    network_stack().socket_set().remove(handle);
+                }
+            }
         }
     }
 
-    pub fn accept(&self, port: u16) -> AxResult<(SocketHandle, (IpEndpoint, IpEndpoint))> {
-        if let Some(entry) = self.tcp[port as usize].lock().deref_mut() {
-            let syn_queue: &mut VecDeque<SocketHandle> = &mut entry.syn_queue;
-            let idx = syn_queue
-                .iter()
-                .enumerate()
-                .find_map(|(idx, &handle)| is_connected(handle).then(|| idx))
-                .ok_or(AxError::WouldBlock)?; // wait for connection
-            if idx > 0 {
-                warn!(
-                    "slow SYN queue enumeration: index = {}, len = {}!",
-                    idx,
-                    syn_queue.len()
-                );
-            }
-            let handle = syn_queue.swap_remove_front(idx).unwrap();
-            // If the connection is reset, return ConnectionReset error
-            // Otherwise, return the handle and the address tuple
-            if is_closed(handle) {
-                ax_err!(ConnectionReset, "socket accept() failed: connection reset")
-            } else {
-                Ok((handle, get_addr_tuple(handle)))
-            }
-        } else {
-            ax_err!(InvalidInput, "socket accept() failed: not listen")
-        }
+    /// 获取指定端口的监听信息
+    pub fn get_listener_info(&self, port: u16) -> Option<ListenerStats> {
+        let listeners = self.listeners.lock();
+        listeners.get(&port).map(|info| ListenerStats {
+            port,
+            endpoint: info.endpoint,
+            queue_len: info.accept_queue.len(),
+            backlog: info.backlog,
+        })
     }
 
-    pub fn incoming_tcp_packet(
-        &self,
-        src: IpEndpoint,
-        dst: IpEndpoint,
-        sockets: &mut SocketSet<'_>,
-    ) {
-        if let Some(entry) = self.tcp[dst.port as usize].lock().deref_mut() {
-            if !entry.can_accept(dst.addr) {
-                // not listening on this address
-                return;
-            }
-            if entry.syn_queue.len() >= LISTEN_QUEUE_SIZE {
-                // SYN queue is full, drop the packet
-                warn!("SYN queue overflow!");
-                return;
-            }
-            let mut socket = SocketSetWrapper::new_tcp_socket();
-            if socket.listen(entry.listen_endpoint).is_ok() {
-                let handle = sockets.add(socket);
-                debug!(
-                    "TCP socket {}: prepare for connection {} -> {}",
-                    handle, src, entry.listen_endpoint
-                );
-                entry.syn_queue.push_back(handle);
-            }
-        }
+    /// 获取所有监听器的统计信息
+    pub fn get_all_stats(&self) -> Vec<ListenerStats> {
+        let listeners = self.listeners.lock();
+        listeners
+            .iter()
+            .map(|(&port, info)| ListenerStats {
+                port,
+                endpoint: info.endpoint,
+                queue_len: info.accept_queue.len(),
+                backlog: info.backlog,
+            })
+            .collect()
     }
 }
 
-fn is_connected(handle: SocketHandle) -> bool {
-    SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| {
-        !matches!(socket.state(), State::Listen | State::SynReceived)
-    })
+/// 监听器统计信息
+#[derive(Debug, Clone)]
+pub struct ListenerStats {
+    pub port: u16,
+    pub endpoint: IpListenEndpoint,
+    pub queue_len: usize,
+    pub backlog: usize,
 }
 
-fn is_closed(handle: SocketHandle) -> bool {
-    SOCKET_SET
-        .with_socket::<tcp::Socket, _, _>(handle, |socket| matches!(socket.state(), State::Closed))
-}
-
-fn get_addr_tuple(handle: SocketHandle) -> (IpEndpoint, IpEndpoint) {
-    SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| {
-        (
-            socket.local_endpoint().unwrap(),
-            socket.remote_endpoint().unwrap(),
-        )
-    })
+impl Default for ListenTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }

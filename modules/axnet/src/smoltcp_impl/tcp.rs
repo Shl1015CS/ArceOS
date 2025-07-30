@@ -1,42 +1,32 @@
-use core::cell::UnsafeCell;
-use core::net::SocketAddr;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+//! TCP Socket 实现
 
-use axerrno::{ax_err, ax_err_type, AxError, AxResult};
-use axhal::time::current_ticks;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::cell::UnsafeCell;
 use axio::{PollState, Read, Write};
 use axsync::Mutex;
-
 use axtask::yield_now;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp::{self, ConnectError, State};
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
-use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
-use super::{SocketSetWrapper, LISTEN_TABLE, SOCKET_SET};
+use crate::error::{NetError, NetResult};
+use crate::stack::{SocketAddr, addr_utils::*};
+use super::{network_stack, current_time};
 
-// State transitions:
-// CLOSED -(connect)-> BUSY -> CONNECTING -> CONNECTED -(shutdown)-> BUSY -> CLOSED
-//       |
-//       |-(listen)-> BUSY -> LISTENING -(shutdown)-> BUSY -> CLOSED
-//       |
-//        -(bind)-> BUSY -> CLOSED
+// TCP Socket 状态
 const STATE_CLOSED: u8 = 0;
 const STATE_BUSY: u8 = 1;
 const STATE_CONNECTING: u8 = 2;
 const STATE_CONNECTED: u8 = 3;
 const STATE_LISTENING: u8 = 4;
 
-/// A TCP socket that provides POSIX-like APIs.
-///
-/// - [`connect`] is for TCP clients.
-/// - [`bind`], [`listen`], and [`accept`] are for TCP servers.
-/// - Other methods are for both TCP clients and servers.
-///
-/// [`connect`]: TcpSocket::connect
-/// [`bind`]: TcpSocket::bind
-/// [`listen`]: TcpSocket::listen
-/// [`accept`]: TcpSocket::accept
+/// TCP Socket 实现
+/// 
+/// 提供 POSIX 风格的 TCP socket API，支持：
+/// - 客户端连接：`connect`
+/// - 服务端监听：`bind`, `listen`, `accept`
+/// - 数据传输：`send`, `recv`
+/// - 非阻塞模式和地址重用
 pub struct TcpSocket {
     state: AtomicU8,
     handle: UnsafeCell<Option<SocketHandle>>,
@@ -49,7 +39,7 @@ pub struct TcpSocket {
 unsafe impl Sync for TcpSocket {}
 
 impl TcpSocket {
-    /// Creates a new TCP socket.
+    /// 创建新的 TCP socket
     pub const fn new() -> Self {
         Self {
             state: AtomicU8::new(STATE_CLOSED),
@@ -61,7 +51,7 @@ impl TcpSocket {
         }
     }
 
-    /// Creates a new TCP socket that is already connected.
+    /// 创建已连接的 TCP socket（内部使用）
     const fn new_connected(
         handle: SocketHandle,
         local_addr: IpEndpoint,
@@ -77,391 +67,297 @@ impl TcpSocket {
         }
     }
 
-    /// Returns the local address and port, or
-    /// [`Err(NotConnected)`](AxError::NotConnected) if not connected.
-    #[inline]
-    pub fn local_addr(&self) -> AxResult<SocketAddr> {
-        // 为了通过测例，已经`bind`但未`listen`的socket也可以返回地址
+    /// 获取本地地址和端口
+    pub fn local_addr(&self) -> NetResult<SocketAddr> {
         match self.get_state() {
             STATE_CONNECTED | STATE_LISTENING | STATE_CLOSED => {
-                Ok(into_core_sockaddr(unsafe { self.local_addr.get().read() }))
+                let local_addr = unsafe { self.local_addr.get().read() };
+                if local_addr == UNSPECIFIED_ENDPOINT {
+                    Err(NetError::NotConnected)
+                } else {
+                    Ok(to_std_socket_addr(local_addr))
+                }
             }
-            _ => Err(AxError::NotConnected),
+            _ => Err(NetError::NotConnected),
         }
     }
 
-    /// Returns the remote address and port, or
-    /// [`Err(NotConnected)`](AxError::NotConnected) if not connected.
-    #[inline]
-    pub fn peer_addr(&self) -> AxResult<SocketAddr> {
+    /// 获取远程地址和端口
+    pub fn peer_addr(&self) -> NetResult<SocketAddr> {
         match self.get_state() {
-            STATE_CONNECTED | STATE_LISTENING => {
-                Ok(into_core_sockaddr(unsafe { self.peer_addr.get().read() }))
+            STATE_CONNECTED => {
+                let peer_addr = unsafe { self.peer_addr.get().read() };
+                Ok(to_std_socket_addr(peer_addr))
             }
-            _ => Err(AxError::NotConnected),
+            _ => Err(NetError::NotConnected),
         }
     }
 
-    /// Returns whether this socket is in nonblocking mode.
-    #[inline]
+    /// 检查是否为非阻塞模式
     pub fn is_nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Acquire)
     }
 
-    /// Moves this TCP stream into or out of nonblocking mode.
-    ///
-    /// This will result in `read`, `write`, `recv` and `send` operations
-    /// becoming nonblocking, i.e., immediately returning from their calls.
-    /// If the IO operation is successful, `Ok` is returned and no further
-    /// action is required. If the IO operation could not be completed and needs
-    /// to be retried, an error with kind  [`Err(WouldBlock)`](AxError::WouldBlock) is
-    /// returned.
-    #[inline]
+    /// 设置非阻塞模式
     pub fn set_nonblocking(&self, nonblocking: bool) {
         self.nonblock.store(nonblocking, Ordering::Release);
     }
 
-    ///Returns whether this socket is in reuse address mode.
-    #[inline]
+    /// 检查是否启用地址重用
     pub fn is_reuse_addr(&self) -> bool {
         self.reuse_addr.load(Ordering::Acquire)
     }
 
-    /// Moves this TCP socket into or out of reuse address mode.
-    ///
-    /// When a socket is bound, the `SO_REUSEADDR` option allows multiple sockets to be bound to the
-    /// same address if they are bound to different local addresses. This option must be set before
-    /// calling `bind`.
-    #[inline]
+    /// 设置地址重用
     pub fn set_reuse_addr(&self, reuse_addr: bool) {
         self.reuse_addr.store(reuse_addr, Ordering::Release);
     }
 
-    /// To get the address pair of the socket.
-    ///
-    /// Returns the local and remote endpoint pair.
-    // fn get_endpoint_pair(
-    //     &self,
-    //     remote_addr: SocketAddr,
-    // ) -> Result<(IpListenEndpoint, IpEndpoint), AxError> {
-    //     // TODO: check remote addr unreachable
-    //     #[allow(unused_mut)]
-    //     let mut remote_endpoint = from_core_sockaddr(remote_addr);
-    //     #[allow(unused_mut)]
-    //     let mut bound_endpoint = self.bound_endpoint()?;
-    //     // #[cfg(feature = "ip")]
-    //     if bound_endpoint.addr.is_none() && remote_endpoint.addr.as_bytes()[0] == 127 {
-    //         // If the remote addr is unspecified, we should copy the local addr.
-    //         // If the local addr is unspecified too, we should use the loopback interface.
-    //         if remote_endpoint.addr.is_unspecified() {
-    //             remote_endpoint.addr =
-    //                 smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(127, 0, 0, 1));
-    //         }
-    //         bound_endpoint.addr = Some(remote_endpoint.addr);
-    //     }
-    //     Ok((bound_endpoint, remote_endpoint))
-    // }
-
-    /// Connects to the given address and port.
-    ///
-    /// The local port is generated automatically.
-    pub fn connect(&self, remote_addr: SocketAddr) -> AxResult {
+    /// 连接到远程地址
+    pub fn connect(&self, remote_addr: SocketAddr) -> NetResult<()> {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
-            // SAFETY: no other threads can read or write these fields.
             let handle = unsafe { self.handle.get().read() }
-                .unwrap_or_else(|| SOCKET_SET.add(SocketSetWrapper::new_tcp_socket()));
+                .unwrap_or_else(|| {
+                    network_stack().socket_set().add(
+                        super::socket_set::SocketSetManager::new_tcp_socket()
+                    )
+                });
 
-            // // TODO: check remote addr unreachable
-            // let (bound_endpoint, remote_endpoint) = self.get_endpoint_pair(remote_addr)?;
-            let remote_endpoint = from_core_sockaddr(remote_addr);
+            let remote_endpoint = from_std_socket_addr(remote_addr);
             let bound_endpoint = self.bound_endpoint()?;
-            info!("bound endpoint: {:?}", bound_endpoint);
-            info!("remote endpoint: {:?}", remote_endpoint);
-            warn!("Temporarily net bridge used");
-            let iface = if remote_endpoint.addr.as_bytes()[0] == 127 {
-                super::LOOPBACK.try_get().unwrap()
+
+            // 选择合适的接口
+            let (local_endpoint, remote_endpoint) = if remote_endpoint.addr.as_bytes()[0] == 127 {
+                let interface = network_stack().loopback_interface().context();
+                network_stack()
+                    .socket_set()
+                    .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                        socket
+                            .connect(&*interface, remote_endpoint, bound_endpoint)
+                            .map_err(|e| match e {
+                                ConnectError::InvalidState => NetError::AlreadyConnected,
+                                ConnectError::Unaddressable => NetError::ConnectionRefused,
+                            })?;
+                        
+                        Ok::<(IpEndpoint, IpEndpoint), NetError>((
+                            socket.local_endpoint().unwrap(),
+                            socket.remote_endpoint().unwrap(),
+                        ))
+                    })?
             } else {
-                info!("Use eth net");
-                &super::ETH0.iface
+                let interface = network_stack().eth_interface().context();
+                network_stack()
+                    .socket_set()
+                    .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                        socket
+                            .connect(&*interface, remote_endpoint, bound_endpoint)
+                            .map_err(|e| match e {
+                                ConnectError::InvalidState => NetError::AlreadyConnected,
+                                ConnectError::Unaddressable => NetError::ConnectionRefused,
+                            })?;
+                        
+                        Ok::<(IpEndpoint, IpEndpoint), NetError>((
+                            socket.local_endpoint().unwrap(),
+                            socket.remote_endpoint().unwrap(),
+                        ))
+                    })?
             };
 
-            let (local_endpoint, remote_endpoint) = SOCKET_SET
-                .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                    socket
-                        .connect(iface.lock().context(), remote_endpoint, bound_endpoint)
-                        .or_else(|e| match e {
-                            ConnectError::InvalidState => {
-                                ax_err!(BadState, "socket connect() failed")
-                            }
-                            ConnectError::Unaddressable => {
-                                ax_err!(ConnectionRefused, "socket connect() failed")
-                            }
-                        })?;
-                    Ok::<(IpEndpoint, IpEndpoint), AxError>((
-                        socket.local_endpoint().unwrap(),
-                        socket.remote_endpoint().unwrap(),
-                    ))
-                })?;
             unsafe {
-                // SAFETY: no other threads can read or write these fields as we
-                // have changed the state to `BUSY`.
                 self.local_addr.get().write(local_endpoint);
                 self.peer_addr.get().write(remote_endpoint);
                 self.handle.get().write(Some(handle));
             }
             Ok(())
         })
-        .unwrap_or_else(|_| ax_err!(AlreadyExists, "socket connect() failed: already connected"))?; // EISCONN
+        .unwrap_or_else(|_| Err(NetError::AlreadyConnected))?;
 
-        // HACK: yield() to let server to listen
+        // 让出 CPU 时间给服务端处理
         yield_now();
 
-        // Here our state must be `CONNECTING`, and only one thread can run here.
         if self.is_nonblocking() {
-            Err(AxError::WouldBlock)
+            Err(NetError::WouldBlock)
         } else {
             self.block_on(|| {
                 let PollState { writable, .. } = self.poll_connect()?;
                 if !writable {
-                    Err(AxError::WouldBlock)
+                    Err(NetError::WouldBlock)
                 } else if self.get_state() == STATE_CONNECTED {
                     Ok(())
                 } else {
-                    ax_err!(ConnectionRefused, "socket connect() failed")
+                    Err(NetError::ConnectionRefused)
                 }
             })
         }
     }
 
-    /// Binds an unbound socket to the given address and port.
-    ///
-    /// If the given port is 0, it generates one automatically.
-    ///
-    /// It's must be called before [`listen`](Self::listen) and
-    /// [`accept`](Self::accept).
-    pub fn bind(&self, mut local_addr: SocketAddr) -> AxResult {
+    /// 绑定到本地地址
+    pub fn bind(&self, mut local_addr: SocketAddr) -> NetResult<()> {
         self.update_state(STATE_CLOSED, STATE_CLOSED, || {
-            // TODO: check addr is available
             if local_addr.port() == 0 {
-                local_addr.set_port(get_ephemeral_port()?);
+                local_addr.set_port(self.get_ephemeral_port()?);
             }
-            // SAFETY: no other threads can read or write `self.local_addr` as we
-            // have changed the state to `BUSY`.
-            unsafe {
-                let old = self.local_addr.get().read();
-                if old != UNSPECIFIED_ENDPOINT {
-                    return ax_err!(InvalidInput, "socket bind() failed: already bound");
-                }
-                self.local_addr.get().write(from_core_sockaddr(local_addr));
-            }
-            let local_endpoint = from_core_sockaddr(local_addr);
-            let bound_endpoint = self.bound_endpoint()?;
-            let handle = unsafe { self.handle.get().read() }
-                .unwrap_or_else(|| SOCKET_SET.add(SocketSetWrapper::new_tcp_socket()));
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                socket.set_bound_endpoint(bound_endpoint);
-            });
 
-            if !self.is_reuse_addr() {
-                SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port)?;
+            let old_addr = unsafe { self.local_addr.get().read() };
+            if old_addr != UNSPECIFIED_ENDPOINT {
+                return Err(NetError::AlreadyConnected);
             }
+
+            let local_endpoint = from_std_socket_addr(local_addr);
+            
+            // 检查地址冲突
+            if !self.is_reuse_addr() {
+                network_stack()
+                    .socket_set()
+                    .check_bind_conflict(local_endpoint.addr, local_endpoint.port)?;
+            }
+
+            let handle = unsafe { self.handle.get().read() }
+                .unwrap_or_else(|| {
+                    network_stack().socket_set().add(
+                        super::socket_set::SocketSetManager::new_tcp_socket()
+                    )
+                });
+
+            let bound_endpoint = self.bound_endpoint_from_addr(local_endpoint)?;
+            network_stack()
+                .socket_set()
+                .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                    socket.set_bound_endpoint(bound_endpoint);
+                });
+
+            unsafe {
+                self.local_addr.get().write(local_endpoint);
+                self.handle.get().write(Some(handle));
+            }
+
             Ok(())
         })
-        .unwrap_or_else(|_| ax_err!(InvalidInput, "socket bind() failed: already bound"))
+        .unwrap_or_else(|_| Err(NetError::AlreadyConnected))
     }
 
-    /// Starts listening on the bound address and port.
-    ///
-    /// It's must be called after [`bind`](Self::bind) and before
-    /// [`accept`](Self::accept).
-    pub fn listen(&self) -> AxResult {
+    /// 开始监听连接
+    pub fn listen(&self) -> NetResult<()> {
         self.update_state(STATE_CLOSED, STATE_LISTENING, || {
             let bound_endpoint = self.bound_endpoint()?;
+            
             unsafe {
                 (*self.local_addr.get()).port = bound_endpoint.port;
             }
-            LISTEN_TABLE.listen(bound_endpoint)?;
-            debug!("TCP socket listening on {}", bound_endpoint);
+            
+            network_stack().listen_table().listen(bound_endpoint)?;
+            debug!("TCP socket 开始监听 {}", bound_endpoint);
             Ok(())
         })
-        .unwrap_or(Ok(())) // ignore simultaneous `listen`s.
+        .unwrap_or(Ok(())) // 忽略重复监听
     }
 
-    /// Accepts a new connection.
-    ///
-    /// This function will block the calling thread until a new TCP connection
-    /// is established. When established, a new [`TcpSocket`] is returned.
-    ///
-    /// It's must be called after [`bind`](Self::bind) and [`listen`](Self::listen).
-    pub fn accept(&self) -> AxResult<TcpSocket> {
+    /// 接受新连接
+    pub fn accept(&self) -> NetResult<TcpSocket> {
         if !self.is_listening() {
-            return ax_err!(InvalidInput, "socket accept() failed: not listen");
+            return Err(NetError::InvalidInput);
         }
 
-        // SAFETY: `self.local_addr` should be initialized after `bind()`.
         let local_port = unsafe { self.local_addr.get().read().port };
         self.block_on(|| {
-            let (handle, (local_addr, peer_addr)) = LISTEN_TABLE.accept(local_port)?;
-            debug!("TCP socket accepted a new connection {}", peer_addr);
+            let (handle, (local_addr, peer_addr)) = 
+                network_stack().listen_table().accept(local_port)?;
+            debug!("TCP socket 接受新连接 {}", peer_addr);
             Ok(TcpSocket::new_connected(handle, local_addr, peer_addr))
         })
     }
 
-    /// Close the connection.
-    pub fn shutdown(&self) -> AxResult {
-        // stream
+    /// 发送数据
+    pub fn send(&self, buf: &[u8]) -> NetResult<usize> {
+        if self.is_connecting() {
+            return Err(NetError::WouldBlock);
+        } else if !self.is_connected() {
+            return Err(NetError::NotConnected);
+        }
+
+        let handle = unsafe { self.handle.get().read().unwrap() };
+        self.block_on(|| {
+            network_stack()
+                .socket_set()
+                .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                    if !socket.is_active() || !socket.may_send() {
+                        Err(NetError::ConnectionReset)
+                    } else if socket.can_send() {
+                        let len = socket
+                            .send_slice(buf)
+                            .map_err(|_| NetError::Internal)?;
+                        Ok(len)
+                    } else {
+                        Err(NetError::WouldBlock)
+                    }
+                })
+        })
+    }
+
+    /// 接收数据
+    pub fn recv(&self, buf: &mut [u8]) -> NetResult<usize> {
+        if self.is_connecting() {
+            return Err(NetError::WouldBlock);
+        } else if !self.is_connected() {
+            return Err(NetError::NotConnected);
+        }
+
+        let handle = unsafe { self.handle.get().read().unwrap() };
+        self.block_on(|| {
+            network_stack()
+                .socket_set()
+                .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                    if socket.recv_queue() > 0 {
+                        let len = socket
+                            .recv_slice(buf)
+                            .map_err(|_| NetError::Internal)?;
+                        Ok(len)
+                    } else if !socket.is_active() {
+                        Err(NetError::ConnectionRefused)
+                    } else if !socket.may_recv() {
+                        Ok(0) // 连接已关闭
+                    } else {
+                        Err(NetError::WouldBlock)
+                    }
+                })
+        })
+    }
+
+    /// 关闭连接
+    pub fn shutdown(&self) -> NetResult<()> {
+        // 关闭流连接
         self.update_state(STATE_CONNECTED, STATE_CLOSED, || {
-            // SAFETY: `self.handle` should be initialized in a connected socket, and
-            // no other threads can read or write it.
             let handle = unsafe { self.handle.get().read().unwrap() };
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                debug!("TCP socket {}: shutting down", handle);
-                socket.close();
-            });
-            unsafe { self.local_addr.get().write(UNSPECIFIED_ENDPOINT) }; // clear bound address
-            SOCKET_SET.poll_interfaces();
+            network_stack()
+                .socket_set()
+                .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                    debug!("TCP socket {}: 关闭连接", handle);
+                    socket.close();
+                });
+            unsafe { 
+                self.local_addr.get().write(UNSPECIFIED_ENDPOINT);
+                self.peer_addr.get().write(UNSPECIFIED_ENDPOINT);
+            }
+            network_stack().poll_interfaces();
             Ok(())
         })
         .unwrap_or(Ok(()))?;
 
-        // listener
+        // 关闭监听
         self.update_state(STATE_LISTENING, STATE_CLOSED, || {
-            // SAFETY: `self.local_addr` should be initialized in a listening socket,
-            // and no other threads can read or write it.
             let local_port = unsafe { self.local_addr.get().read().port };
-            unsafe { self.local_addr.get().write(UNSPECIFIED_ENDPOINT) }; // clear bound address
-            LISTEN_TABLE.unlisten(local_port);
-            SOCKET_SET.poll_interfaces();
+            unsafe { self.local_addr.get().write(UNSPECIFIED_ENDPOINT); }
+            network_stack().listen_table().unlisten(local_port);
+            network_stack().poll_interfaces();
             Ok(())
         })
         .unwrap_or(Ok(()))?;
 
-        // ignore for other states
         Ok(())
     }
 
-    /// Close the transmit half of the tcp socket.
-    /// It will call `close()` on smoltcp::socket::tcp::Socket. It should send FIN to remote half.
-    ///
-    /// This function is for shutdown(fd, SHUT_WR) syscall.
-    ///
-    /// It won't change TCP state.
-    /// It won't affect unconnected sockets (listener).
-    pub fn close(&self) {
-        let handle = match unsafe { self.handle.get().read() } {
-            Some(h) => h,
-            None => return,
-        };
-        SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| socket.close());
-        SOCKET_SET.poll_interfaces();
-    }
-
-    /// Receives data from the socket, stores it in the given buffer.
-    pub fn recv(&self, buf: &mut [u8]) -> AxResult<usize> {
-        if self.is_connecting() {
-            return Err(AxError::WouldBlock);
-        } else if !self.is_connected() {
-            return ax_err!(NotConnected, "socket recv() failed");
-        }
-
-        // SAFETY: `self.handle` should be initialized in a connected socket.
-        let handle = unsafe { self.handle.get().read().unwrap() };
-        self.block_on(|| {
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                if socket.recv_queue() > 0 {
-                    // data available
-                    // TODO: use socket.recv(|buf| {...})
-                    let len = socket
-                        .recv_slice(buf)
-                        .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
-                    Ok(len)
-                } else if !socket.is_active() {
-                    // not open
-                    ax_err!(ConnectionRefused, "socket recv() failed")
-                } else if !socket.may_recv() {
-                    // connection closed
-                    Ok(0)
-                } else {
-                    // no more data
-                    Err(AxError::WouldBlock)
-                }
-            })
-        })
-    }
-    /// Receives data from the socket, stores it in the given buffer.
-    ///
-    /// It will return [`Err(Timeout)`](AxError::Timeout) if expired.
-    pub fn recv_timeout(&self, buf: &mut [u8], ticks: u64) -> AxResult<usize> {
-        if self.is_connecting() {
-            return Err(AxError::WouldBlock);
-        } else if !self.is_connected() {
-            return ax_err!(NotConnected, "socket recv() failed");
-        }
-
-        let expire_at = current_ticks() + ticks;
-
-        // SAFETY: `self.handle` should be initialized in a connected socket.
-        let handle = unsafe { self.handle.get().read().unwrap() };
-        self.block_on(|| {
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                if socket.recv_queue() > 0 {
-                    // data available
-                    // TODO: use socket.recv(|buf| {...})
-                    let len = socket
-                        .recv_slice(buf)
-                        .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
-                    Ok(len)
-                } else if !socket.is_active() {
-                    // not open
-                    ax_err!(ConnectionRefused, "socket recv() failed")
-                } else if !socket.may_recv() {
-                    // connection closed
-                    Ok(0)
-                } else {
-                    // no more data
-                    if current_ticks() > expire_at {
-                        // TODO:timeout
-                        Err(AxError::Unsupported)
-                    } else {
-                        Err(AxError::WouldBlock)
-                    }
-                }
-            })
-        })
-    }
-
-    /// Transmits data in the given buffer.
-    pub fn send(&self, buf: &[u8]) -> AxResult<usize> {
-        if self.is_connecting() {
-            return Err(AxError::WouldBlock);
-        } else if !self.is_connected() {
-            return ax_err!(NotConnected, "socket send() failed");
-        }
-
-        // SAFETY: `self.handle` should be initialized in a connected socket.
-        let handle = unsafe { self.handle.get().read().unwrap() };
-        self.block_on(|| {
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                if !socket.is_active() || !socket.may_send() {
-                    // closed by remote
-                    ax_err!(ConnectionReset, "socket send() failed")
-                } else if socket.can_send() {
-                    // connected, and the tx buffer is not full
-                    // TODO: use socket.send(|buf| {...})
-                    let len = socket
-                        .send_slice(buf)
-                        .map_err(|_| ax_err_type!(BadState, "socket send() failed"))?;
-                    Ok(len)
-                } else {
-                    // tx buffer is full
-                    Err(AxError::WouldBlock)
-                }
-            })
-        })
-    }
-
-    /// Whether the socket is readable or writable.
-    pub fn poll(&self) -> AxResult<PollState> {
+    /// 轮询 socket 状态
+    pub fn poll(&self) -> NetResult<PollState> {
         match self.get_state() {
             STATE_CONNECTING => self.poll_connect(),
             STATE_CONNECTED => self.poll_stream(),
@@ -473,95 +369,53 @@ impl TcpSocket {
         }
     }
 
-    /// To set the nagle algorithm enabled or not.
-    pub fn set_nagle_enabled(&self, enabled: bool) -> AxResult {
+    /// 设置 Nagle 算法
+    pub fn set_nagle_enabled(&self, enabled: bool) -> NetResult<()> {
         let handle = unsafe { self.handle.get().read() };
-
-        let Some(handle) = handle else {
-            return Err(AxError::NotConnected);
-        };
-
-        SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-            socket.set_nagle_enabled(enabled)
-        });
-
-        Ok(())
+        if let Some(handle) = handle {
+            network_stack()
+                .socket_set()
+                .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                    socket.set_nagle_enabled(enabled)
+                });
+            Ok(())
+        } else {
+            Err(NetError::NotConnected)
+        }
     }
 
-    /// To get the nagle algorithm enabled or not.
+    /// 获取 Nagle 算法状态
     pub fn nagle_enabled(&self) -> bool {
         let handle = unsafe { self.handle.get().read() };
-
         match handle {
-            Some(handle) => {
-                SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| socket.nagle_enabled())
-            }
-            // Nagle algorithm will be enabled by default once the socket is created
-            None => true,
-        }
-    }
-
-    /// To get the socket and call the given function.
-    ///
-    /// If the socket is not connected, it will return None.
-    ///
-    /// Or it will return the result of the given function.
-    pub fn with_socket<R>(&self, f: impl FnOnce(Option<&tcp::Socket>) -> R) -> R {
-        let handle = unsafe { self.handle.get().read() };
-
-        match handle {
-            Some(handle) => {
-                SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| f(Some(socket)))
-            }
-            None => f(None),
-        }
-    }
-
-    /// To get the mutable socket and call the given function.
-    ///
-    /// If the socket is not connected, it will return None.
-    ///
-    /// Or it will return the result of the given function.
-    pub fn with_socket_mut<R>(&self, f: impl FnOnce(Option<&mut tcp::Socket>) -> R) -> R {
-        let handle = unsafe { self.handle.get().read() };
-
-        match handle {
-            Some(handle) => {
-                SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| f(Some(socket)))
-            }
-            None => f(None),
+            Some(handle) => network_stack()
+                .socket_set()
+                .with_socket::<tcp::Socket, _, _>(handle, |socket| socket.nagle_enabled()),
+            None => true, // 默认启用
         }
     }
 }
 
-/// Private methods
+// 私有方法实现
 impl TcpSocket {
-    #[inline]
     fn get_state(&self) -> u8 {
         self.state.load(Ordering::Acquire)
     }
 
-    #[inline]
     fn set_state(&self, state: u8) {
         self.state.store(state, Ordering::Release);
     }
 
-    /// Update the state of the socket atomically.
-    ///
-    /// If the current state is `expect`, it first changes the state to `STATE_BUSY`,
-    /// then calls the given function. If the function returns `Ok`, it changes the
-    /// state to `new`, otherwise it changes the state back to `expect`.
-    ///
-    /// It returns `Ok` if the current state is `expect`, otherwise it returns
-    /// the current state in `Err`.
-    fn update_state<F, T>(&self, expect: u8, new: u8, f: F) -> Result<AxResult<T>, u8>
+    fn update_state<F, T>(&self, expect: u8, new: u8, f: F) -> Result<NetResult<T>, u8>
     where
-        F: FnOnce() -> AxResult<T>,
+        F: FnOnce() -> NetResult<T>,
     {
-        match self
-            .state
-            .compare_exchange(expect, STATE_BUSY, Ordering::Acquire, Ordering::Acquire)
-        {
+        match self.state.compare_exchange(
+            expect,
+            STATE_BUSY,
+            Ordering::Acquire,
+            Ordering::Acquire,
+        ) {
             Ok(_) => {
                 let res = f();
                 if res.is_ok() {
@@ -575,112 +429,122 @@ impl TcpSocket {
         }
     }
 
-    #[inline]
     fn is_connecting(&self) -> bool {
         self.get_state() == STATE_CONNECTING
     }
 
-    #[inline]
-    /// Whether the socket is connected.
-    pub fn is_connected(&self) -> bool {
+    fn is_connected(&self) -> bool {
         self.get_state() == STATE_CONNECTED
     }
 
-    #[inline]
-    /// Whether the socket is closed.
-    pub fn is_closed(&self) -> bool {
-        self.get_state() == STATE_CLOSED
-    }
-
-    #[inline]
     fn is_listening(&self) -> bool {
         self.get_state() == STATE_LISTENING
     }
 
-    fn bound_endpoint(&self) -> AxResult<IpListenEndpoint> {
-        // SAFETY: no other threads can read or write `self.local_addr`.
+    fn bound_endpoint(&self) -> NetResult<IpListenEndpoint> {
         let local_addr = unsafe { self.local_addr.get().read() };
         let port = if local_addr.port != 0 {
             local_addr.port
         } else {
-            get_ephemeral_port()?
+            self.get_ephemeral_port()?
         };
-        assert_ne!(port, 0);
+        
         let addr = if !is_unspecified(local_addr.addr) {
             Some(local_addr.addr)
         } else {
             None
         };
+        
         Ok(IpListenEndpoint { addr, port })
     }
 
-    fn poll_connect(&self) -> AxResult<PollState> {
-        // SAFETY: `self.handle` should be initialized above.
+    fn bound_endpoint_from_addr(&self, addr: IpEndpoint) -> NetResult<IpListenEndpoint> {
+        let addr_opt = if !is_unspecified(addr.addr) {
+            Some(addr.addr)
+        } else {
+            None
+        };
+        
+        Ok(IpListenEndpoint {
+            addr: addr_opt,
+            port: addr.port,
+        })
+    }
+
+    fn get_ephemeral_port(&self) -> NetResult<u16> {
+        use crate::stack::PortManager;
+        static PORT_MANAGER: PortManager = PortManager::new();
+        
+        for _ in 0..1000 { // 最多尝试 1000 次
+            let port = PORT_MANAGER.next_ephemeral_port();
+            if network_stack().listen_table().can_listen(port) {
+                return Ok(port);
+            }
+        }
+        Err(NetError::AddrInUse)
+    }
+
+    fn poll_connect(&self) -> NetResult<PollState> {
         let handle = unsafe { self.handle.get().read().unwrap() };
-        let writable =
-            SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| match socket.state() {
-                State::SynSent => false, // wait for connection
-                State::Established => {
-                    self.set_state(STATE_CONNECTED); // connected
-                    debug!(
-                        "TCP socket {}: connected to {}",
-                        handle,
-                        socket.remote_endpoint().unwrap(),
-                    );
-                    true
-                }
-                _ => {
-                    unsafe {
-                        self.local_addr.get().write(UNSPECIFIED_ENDPOINT);
-                        self.peer_addr.get().write(UNSPECIFIED_ENDPOINT);
+        let writable = network_stack()
+            .socket_set()
+            .with_socket::<tcp::Socket, _, _>(handle, |socket| {
+                match socket.state() {
+                    State::SynSent => false,
+                    State::Established => {
+                        self.set_state(STATE_CONNECTED);
+                        debug!("TCP socket {}: 连接已建立到 {}", handle, socket.remote_endpoint().unwrap());
+                        true
                     }
-                    self.set_state(STATE_CLOSED); // connection failed
-                    true
+                    _ => {
+                        unsafe {
+                            self.local_addr.get().write(UNSPECIFIED_ENDPOINT);
+                            self.peer_addr.get().write(UNSPECIFIED_ENDPOINT);
+                        }
+                        self.set_state(STATE_CLOSED);
+                        true
+                    }
                 }
             });
+        
         Ok(PollState {
             readable: false,
             writable,
         })
     }
 
-    fn poll_stream(&self) -> AxResult<PollState> {
-        // SAFETY: `self.handle` should be initialized in a connected socket.
+    fn poll_stream(&self) -> NetResult<PollState> {
         let handle = unsafe { self.handle.get().read().unwrap() };
-        SOCKET_SET.with_socket::<tcp::Socket, _, _>(handle, |socket| {
-            Ok(PollState {
-                readable: !socket.may_recv() || socket.can_recv(),
-                writable: !socket.may_send() || socket.can_send(),
+        network_stack()
+            .socket_set()
+            .with_socket::<tcp::Socket, _, _>(handle, |socket| {
+                Ok(PollState {
+                    readable: !socket.may_recv() || socket.can_recv(),
+                    writable: !socket.may_send() || socket.can_send(),
+                })
             })
-        })
     }
 
-    fn poll_listener(&self) -> AxResult<PollState> {
-        // SAFETY: `self.local_addr` should be initialized in a listening socket.
+    fn poll_listener(&self) -> NetResult<PollState> {
         let local_addr = unsafe { self.local_addr.get().read() };
         Ok(PollState {
-            readable: LISTEN_TABLE.can_accept(local_addr.port)?,
+            readable: network_stack().listen_table().can_accept(local_addr.port)?,
             writable: false,
         })
     }
 
-    /// Block the current thread until the given function completes or fails.
-    ///
-    /// If the socket is non-blocking, it calls the function once and returns
-    /// immediately. Otherwise, it may call the function multiple times if it
-    /// returns [`Err(WouldBlock)`](AxError::WouldBlock).
-    fn block_on<F, T>(&self, mut f: F) -> AxResult<T>
+    fn block_on<F, T>(&self, mut f: F) -> NetResult<T>
     where
-        F: FnMut() -> AxResult<T>,
+        F: FnMut() -> NetResult<T>,
     {
         if self.is_nonblocking() {
             f()
         } else {
             loop {
-                SOCKET_SET.poll_interfaces();
+                network_stack().poll_interfaces();
                 match f() {
                     Ok(t) => return Ok(t),
-                    Err(AxError::WouldBlock) => axtask::yield_now(),
+                    Err(NetError::WouldBlock) => yield_now(),
                     Err(e) => return Err(e),
                 }
             }
@@ -689,50 +553,26 @@ impl TcpSocket {
 }
 
 impl Read for TcpSocket {
-    fn read(&mut self, buf: &mut [u8]) -> AxResult<usize> {
-        self.recv(buf)
+    fn read(&mut self, buf: &mut [u8]) -> axerrno::AxResult<usize> {
+        self.recv(buf).map_err(|e| e.into())
     }
 }
 
 impl Write for TcpSocket {
-    fn write(&mut self, buf: &[u8]) -> AxResult<usize> {
-        self.send(buf)
+    fn write(&mut self, buf: &[u8]) -> axerrno::AxResult<usize> {
+        self.send(buf).map_err(|e| e.into())
     }
 
-    fn flush(&mut self) -> AxResult {
-        Err(AxError::Unsupported)
+    fn flush(&mut self) -> axerrno::AxResult {
+        Ok(()) // TCP 自动刷新
     }
 }
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        self.shutdown().ok();
-        // Safe because we have mut reference to `self`.
+        let _ = self.shutdown();
         if let Some(handle) = unsafe { self.handle.get().read() } {
-            SOCKET_SET.remove(handle);
+            network_stack().socket_set().remove(handle);
         }
     }
-}
-
-fn get_ephemeral_port() -> AxResult<u16> {
-    const PORT_START: u16 = 0xc000;
-    const PORT_END: u16 = 0xffff;
-    static CURR: Mutex<u16> = Mutex::new(PORT_START);
-
-    let mut curr = CURR.lock();
-    let mut tries = 0;
-    // TODO: more robust
-    while tries <= PORT_END - PORT_START {
-        let port = *curr;
-        if *curr == PORT_END {
-            *curr = PORT_START;
-        } else {
-            *curr += 1;
-        }
-        if LISTEN_TABLE.can_listen(port) {
-            return Ok(port);
-        }
-        tries += 1;
-    }
-    ax_err!(AddrInUse, "no avaliable ports!")
 }

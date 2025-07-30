@@ -1,396 +1,263 @@
-mod addr;
-mod bench;
+//! 基于smoltcp的完整网络栈实现
+//!
+//! 提供完整的TCP/UDP网络功能，包括：
+//! - 网络接口管理（以太网、回环）
+//! - Socket集合管理
+//! - TCP连接管理和监听表
+//! - DNS解析服务
+//! - 网络统计和监控
+
+mod device;
 mod dns;
+mod interface;
 mod listen_table;
+mod socket_set;
 mod tcp;
 mod udp;
 
-use alloc::vec;
-use axerrno::{AxError, AxResult};
-use core::cell::RefCell;
-use core::ops::DerefMut;
-
+use alloc::sync::Arc;
 use axdriver::prelude::*;
-use axdriver_net::{DevError, NetBufPtr};
 use axhal::time::NANOS_PER_MICROS;
 use axsync::Mutex;
 use lazy_init::LazyInit;
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{self, AnySocket, Socket};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+use smoltcp::wire::{EthernetAddress, IpAddress};
 
-use self::listen_table::ListenTable;
+use crate::error::{NetError, NetResult};
+use crate::NetworkStats;
 
 pub use self::dns::dns_query;
 pub use self::tcp::TcpSocket;
 pub use self::udp::UdpSocket;
-pub use addr::{from_core_sockaddr, into_core_sockaddr};
-#[allow(unused)]
+
+// 网络配置常量
+const DNS_SERVER: &str = "8.8.8.8";
+const BACKUP_DNS_SERVER: &str = "8.8.4.4";
+
+// 环境变量配置
 macro_rules! env_or_default {
-    ($key:literal) => {
+    ($key:literal, $default:literal) => {
         match option_env!($key) {
             Some(val) => val,
-            None => "",
+            None => $default,
         }
     };
 }
 
-const DNS_SEVER: &str = "8.8.8.8";
-
-const RANDOM_SEED: u64 = 0xA2CE_05A2_CE05_A2CE;
-const STANDARD_MTU: usize = 1500;
-const TCP_RX_BUF_LEN: usize = 64 * 1024;
-const TCP_TX_BUF_LEN: usize = 64 * 1024;
-const UDP_RX_BUF_LEN: usize = 64 * 1024;
-const UDP_TX_BUF_LEN: usize = 64 * 1024;
-const LISTEN_QUEUE_SIZE: usize = 512;
-
-static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
-static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
-
-mod loopback;
-static LOOPBACK_DEV: LazyInit<Mutex<LoopbackDev>> = LazyInit::new();
-static LOOPBACK: LazyInit<Mutex<Interface>> = LazyInit::new();
-use self::loopback::LoopbackDev;
-
-const IP: &str = env_or_default!("AX_IP");
-const GATEWAY: &str = env_or_default!("AX_GW");
+const IP: &str = env_or_default!("AX_IP", "10.0.2.15");
+const GATEWAY: &str = env_or_default!("AX_GW", "10.0.2.2");
 const IP_PREFIX: u8 = 24;
 
-static ETH0: LazyInit<InterfaceWrapper> = LazyInit::new();
+// 全局网络栈实例
+static NETWORK_STACK: LazyInit<Arc<NetworkStack>> = LazyInit::new();
 
-struct SocketSetWrapper<'a>(Mutex<SocketSet<'a>>);
-
-struct DeviceWrapper {
-    inner: RefCell<AxNetDevice>, // use `RefCell` is enough since it's wrapped in `Mutex` in `InterfaceWrapper`.
+/// 网络栈管理器
+/// 
+/// 管理整个网络栈的核心组件，包括：
+/// - 网络接口（以太网、回环）
+/// - Socket集合管理
+/// - TCP监听表
+/// - 网络统计信息
+pub struct NetworkStack {
+    eth_interface: interface::EthernetInterface,
+    loopback_interface: interface::LoopbackInterface,
+    socket_set: socket_set::SocketSetManager,
+    listen_table: listen_table::ListenTable,
+    stats: Mutex<NetworkStats>,
 }
 
-struct InterfaceWrapper {
-    name: &'static str,
-    ether_addr: EthernetAddress,
-    dev: Mutex<DeviceWrapper>,
-    iface: Mutex<Interface>,
-}
+impl NetworkStack {
+    /// 创建新的网络栈实例
+    fn new(net_dev: AxNetDevice) -> NetResult<Self> {
+        info!("创建网络栈...");
 
-impl<'a> SocketSetWrapper<'a> {
-    fn new() -> Self {
-        Self(Mutex::new(SocketSet::new(vec![])))
-    }
+        // 创建以太网接口
+        let ether_addr = EthernetAddress(net_dev.mac_address().0);
+        let eth_interface = interface::EthernetInterface::new("eth0", net_dev, ether_addr)?;
 
-    pub fn new_tcp_socket() -> socket::tcp::Socket<'a> {
-        let tcp_rx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]);
-        let tcp_tx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]);
-        socket::tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer)
-    }
+        // 配置IP地址和网关
+        let ip: IpAddress = IP.parse().map_err(|_| NetError::InvalidInput)?;
+        let gateway: IpAddress = GATEWAY.parse().map_err(|_| NetError::InvalidInput)?;
+        
+        eth_interface.setup_ip_addr(ip, IP_PREFIX)?;
+        eth_interface.setup_gateway(gateway)?;
 
-    pub fn new_udp_socket() -> socket::udp::Socket<'a> {
-        let udp_rx_buffer = socket::udp::PacketBuffer::new(
-            vec![socket::udp::PacketMetadata::EMPTY; 256],
-            vec![0; UDP_RX_BUF_LEN],
-        );
-        let udp_tx_buffer = socket::udp::PacketBuffer::new(
-            vec![socket::udp::PacketMetadata::EMPTY; 256],
-            vec![0; UDP_TX_BUF_LEN],
-        );
-        socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer)
-    }
+        info!("网络接口配置:");
+        info!("  接口名称: {}", eth_interface.name());
+        info!("  MAC地址: {}", eth_interface.ethernet_address());
+        info!("  IP地址: {}/{}", ip, IP_PREFIX);
+        info!("  网关: {}", gateway);
 
-    pub fn new_dns_socket() -> socket::dns::Socket<'a> {
-        let server_addr = DNS_SEVER.parse().expect("invalid DNS server address");
-        socket::dns::Socket::new(&[server_addr], vec![])
-    }
+        // 创建回环接口
+        let loopback_interface = interface::LoopbackInterface::new()?;
+        info!("回环接口已创建");
 
-    pub fn add<T: AnySocket<'a>>(&self, socket: T) -> SocketHandle {
-        let handle = self.0.lock().add(socket);
-        debug!("socket {}: created", handle);
-        handle
-    }
+        // 创建Socket集合管理器
+        let socket_set = socket_set::SocketSetManager::new();
+        info!("Socket管理器已初始化");
 
-    pub fn with_socket<T: AnySocket<'a>, R, F>(&self, handle: SocketHandle, f: F) -> R
-    where
-        F: FnOnce(&T) -> R,
-    {
-        let set = self.0.lock();
-        let socket = set.get(handle);
-        f(socket)
-    }
+        // 创建TCP监听表
+        let listen_table = listen_table::ListenTable::new();
+        info!("TCP监听表已初始化");
 
-    pub fn with_socket_mut<T: AnySocket<'a>, R, F>(&self, handle: SocketHandle, f: F) -> R
-    where
-        F: FnOnce(&mut T) -> R,
-    {
-        let mut set = self.0.lock();
-        let socket = set.get_mut(handle);
-        f(socket)
-    }
-
-    pub fn bind_check(&self, addr: IpAddress, _port: u16) -> AxResult {
-        let mut sockets = self.0.lock();
-        for item in sockets.iter_mut() {
-            match item.1 {
-                Socket::Tcp(s) => {
-                    let local_addr = s.get_bound_endpoint();
-                    if local_addr.addr == Some(addr) {
-                        return Err(AxError::AddrInUse);
-                    }
-                }
-                Socket::Udp(s) => {
-                    if s.endpoint().addr == Some(addr) {
-                        return Err(AxError::AddrInUse);
-                    }
-                }
-                _ => continue,
-            };
-        }
-        Ok(())
-    }
-
-    pub fn poll_interfaces(&self) {
-        LOOPBACK.lock().poll(
-            Instant::from_micros_const((0 / NANOS_PER_MICROS) as i64),
-            LOOPBACK_DEV.lock().deref_mut(),
-            &mut self.0.lock(),
-        );
-    }
-
-    pub fn remove(&self, handle: SocketHandle) {
-        self.0.lock().remove(handle);
-        debug!("socket {}: destroyed", handle);
-    }
-}
-
-#[allow(unused)]
-impl InterfaceWrapper {
-    fn new(name: &'static str, dev: AxNetDevice, ether_addr: EthernetAddress) -> Self {
-        let mut config = Config::new(HardwareAddress::Ethernet(ether_addr));
-        config.random_seed = RANDOM_SEED;
-
-        let mut dev = DeviceWrapper::new(dev);
-        let iface = Mutex::new(Interface::new(config, &mut dev, Self::current_time()));
-        Self {
-            name,
-            ether_addr,
-            dev: Mutex::new(dev),
-            iface,
-        }
-    }
-
-    fn current_time() -> Instant {
-        Instant::from_micros_const((0 / NANOS_PER_MICROS) as i64)
-    }
-
-    pub fn name(&self) -> &str {
-        self.name
-    }
-
-    pub fn ethernet_address(&self) -> EthernetAddress {
-        self.ether_addr
-    }
-
-    pub fn setup_ip_addr(&self, ip: IpAddress, prefix_len: u8) {
-        let mut iface = self.iface.lock();
-        iface.update_ip_addrs(|ip_addrs| {
-            ip_addrs.push(IpCidr::new(ip, prefix_len)).unwrap();
+        // 初始化统计信息
+        let stats = Mutex::new(NetworkStats {
+            tx_packets: 0,
+            rx_packets: 0,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            tcp_connections: 0,
+            udp_sockets: 0,
         });
+
+        Ok(Self {
+            eth_interface,
+            loopback_interface,
+            socket_set,
+            listen_table,
+            stats,
+        })
     }
 
-    pub fn setup_gateway(&self, gateway: IpAddress) {
-        let mut iface = self.iface.lock();
-        match gateway {
-            IpAddress::Ipv4(v4) => iface.routes_mut().add_default_ipv4_route(v4).unwrap(),
-            IpAddress::Ipv6(v6) => iface.routes_mut().add_default_ipv6_route(v6).unwrap(),
-        };
+    /// 轮询所有网络接口
+    /// 
+    /// 处理网络数据包的收发，更新Socket状态
+    pub fn poll_interfaces(&self) {
+        let timestamp = current_time();
+        
+        // 轮询以太网接口
+        self.eth_interface.poll(timestamp, &self.socket_set);
+        
+        // 轮询回环接口
+        self.loopback_interface.poll(timestamp, &self.socket_set);
+        
+        // 更新统计信息
+        self.update_stats();
     }
 
-    pub fn poll(&self, sockets: &Mutex<SocketSet>) {
-        let mut dev = self.dev.lock();
-        let mut iface = self.iface.lock();
-        let mut sockets = sockets.lock();
-        let timestamp = Self::current_time();
-        iface.poll(timestamp, dev.deref_mut(), &mut sockets);
-    }
-}
-
-impl DeviceWrapper {
-    fn new(inner: AxNetDevice) -> Self {
-        Self {
-            inner: RefCell::new(inner),
-        }
-    }
-}
-
-impl Device for DeviceWrapper {
-    type RxToken<'a>
-        = AxNetRxToken<'a>
-    where
-        Self: 'a;
-    type TxToken<'a>
-        = AxNetTxToken<'a>
-    where
-        Self: 'a;
-
-    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let mut dev = self.inner.borrow_mut();
-        if let Err(e) = dev.recycle_tx_buffers() {
-            warn!("recycle_tx_buffers failed: {:?}", e);
-            return None;
-        }
-
-        if !dev.can_transmit() {
-            return None;
-        }
-        let rx_buf = match dev.receive() {
-            Ok(buf) => buf,
-            Err(err) => {
-                if !matches!(err, DevError::Again) {
-                    warn!("receive failed: {:?}", err);
-                }
-                return None;
-            }
-        };
-        Some((AxNetRxToken(&self.inner, rx_buf), AxNetTxToken(&self.inner)))
+    /// 更新网络统计信息
+    fn update_stats(&self) {
+        let mut stats = self.stats.lock();
+        stats.tcp_connections = self.listen_table.active_connections();
+        stats.udp_sockets = self.socket_set.udp_socket_count();
+        // 其他统计信息由接口层更新
     }
 
-    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        let mut dev = self.inner.borrow_mut();
-        if let Err(e) = dev.recycle_tx_buffers() {
-            warn!("recycle_tx_buffers failed: {:?}", e);
-            return None;
-        }
-        if dev.can_transmit() {
-            Some(AxNetTxToken(&self.inner))
-        } else {
-            None
-        }
+    /// 获取网络统计信息
+    pub fn get_stats(&self) -> NetworkStats {
+        self.stats.lock().clone()
     }
 
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut caps = DeviceCapabilities::default();
-        caps.max_transmission_unit = 1514;
-        caps.max_burst_size = None;
-        caps.medium = Medium::Ethernet;
-        caps
+    /// 获取Socket集合管理器
+    pub fn socket_set(&self) -> &socket_set::SocketSetManager {
+        &self.socket_set
+    }
+
+    /// 获取TCP监听表
+    pub fn listen_table(&self) -> &listen_table::ListenTable {
+        &self.listen_table
+    }
+
+    /// 获取以太网接口
+    pub fn eth_interface(&self) -> &interface::EthernetInterface {
+        &self.eth_interface
+    }
+
+    /// 获取回环接口
+    pub fn loopback_interface(&self) -> &interface::LoopbackInterface {
+        &self.loopback_interface
+    }
+
+    /// 检查网络连接状态
+    pub fn is_link_up(&self) -> bool {
+        self.eth_interface.is_link_up()
+    }
+
+    /// 获取本地IP地址
+    pub fn local_ip(&self) -> Option<IpAddress> {
+        self.eth_interface.ip_addr()
+    }
+
+    /// 获取网关地址
+    pub fn gateway(&self) -> Option<IpAddress> {
+        self.eth_interface.gateway()
     }
 }
 
-struct AxNetRxToken<'a>(&'a RefCell<AxNetDevice>, NetBufPtr);
-struct AxNetTxToken<'a>(&'a RefCell<AxNetDevice>);
-
-impl<'a> RxToken for AxNetRxToken<'a> {
-    fn preprocess(&self, sockets: &mut SocketSet<'_>) {
-        snoop_tcp_packet(self.1.packet(), sockets).ok();
-    }
-
-    fn consume<R, F>(self, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut rx_buf = self.1;
-        trace!(
-            "RECV {} bytes: {:02X?}",
-            rx_buf.packet_len(),
-            rx_buf.packet()
-        );
-        let result = f(rx_buf.packet_mut());
-        self.0.borrow_mut().recycle_rx_buffer(rx_buf).unwrap();
-        result
-    }
+/// 获取当前时间戳
+pub fn current_time() -> Instant {
+    Instant::from_micros_const((axhal::time::current_time_nanos() / NANOS_PER_MICROS) as i64)
 }
 
-impl<'a> TxToken for AxNetTxToken<'a> {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut dev = self.0.borrow_mut();
-        let mut tx_buf = dev.alloc_tx_buffer(len).unwrap();
-        let ret = f(tx_buf.packet_mut());
-        trace!("SEND {} bytes: {:02X?}", len, tx_buf.packet());
-        dev.transmit(tx_buf).unwrap();
-        ret
-    }
+/// 初始化网络栈
+pub fn init_network_stack(net_dev: AxNetDevice) {
+    let stack = NetworkStack::new(net_dev).expect("网络栈初始化失败");
+    NETWORK_STACK.init_by(Arc::new(stack));
+    
+    // 启动网络轮询任务
+    spawn_network_poll_task();
 }
 
-fn snoop_tcp_packet(buf: &[u8], sockets: &mut SocketSet<'_>) -> Result<(), smoltcp::wire::Error> {
-    use smoltcp::wire::{EthernetFrame, IpProtocol, Ipv4Packet, TcpPacket};
-
-    let ether_frame = EthernetFrame::new_checked(buf)?;
-    let ipv4_packet = Ipv4Packet::new_checked(ether_frame.payload())?;
-
-    if ipv4_packet.next_header() == IpProtocol::Tcp {
-        let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload())?;
-        let src_addr = (ipv4_packet.src_addr(), tcp_packet.src_port()).into();
-        let dst_addr = (ipv4_packet.dst_addr(), tcp_packet.dst_port()).into();
-        let is_first = tcp_packet.syn() && !tcp_packet.ack();
-        if is_first {
-            // create a socket for the first incoming TCP packet, as the later accept() returns.
-            LISTEN_TABLE.incoming_tcp_packet(src_addr, dst_addr, sockets);
-        }
-    }
-    Ok(())
+/// 获取全局网络栈实例
+pub fn network_stack() -> &'static Arc<NetworkStack> {
+    NETWORK_STACK.get()
 }
 
-/// Poll the network stack.
-///
-/// It may receive packets from the NIC and process them, and transmit queued
-/// packets to the NIC.
+/// 轮询网络接口（公共接口）
 pub fn poll_interfaces() {
-    SOCKET_SET.poll_interfaces();
+    if let Some(stack) = NETWORK_STACK.try_get() {
+        stack.poll_interfaces();
+    }
 }
 
-/// Benchmark raw socket transmit bandwidth.
-pub fn bench_transmit() {
-    ETH0.dev.lock().bench_transmit_bandwidth();
+/// 获取网络统计信息
+pub fn get_network_stats() -> NetResult<NetworkStats> {
+    if let Some(stack) = NETWORK_STACK.try_get() {
+        Ok(stack.get_stats())
+    } else {
+        Err(NetError::Internal)
+    }
 }
 
-/// Benchmark raw socket receive bandwidth.
-pub fn bench_receive() {
-    ETH0.dev.lock().bench_receive_bandwidth();
-}
-
-/// Add multicast_addr to the loopback device.
-pub fn add_membership(multicast_addr: IpAddress, _interface_addr: IpAddress) {
-    let timestamp = Instant::from_micros_const((0 / NANOS_PER_MICROS) as i64);
-    let _ = LOOPBACK.lock().join_multicast_group(
-        LOOPBACK_DEV.lock().deref_mut(),
-        multicast_addr,
-        timestamp,
-    );
-}
-
-pub(crate) fn init(_net_dev: AxNetDevice) {
-    let mut device = LoopbackDev::new(Medium::Ip);
-    let config = Config::new(smoltcp::wire::HardwareAddress::Ip);
-
-    let mut iface = Interface::new(
-        config,
-        &mut device,
-        Instant::from_micros_const((0 / NANOS_PER_MICROS) as i64),
-    );
-    iface.update_ip_addrs(|ip_addrs| {
-        ip_addrs
-            .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
-            .unwrap();
+/// 启动网络轮询任务
+fn spawn_network_poll_task() {
+    axtask::spawn(|| {
+        info!("网络轮询任务已启动");
+        loop {
+            poll_interfaces();
+            axtask::yield_now();
+        }
     });
-    LOOPBACK.init_by(Mutex::new(iface));
-    LOOPBACK_DEV.init_by(Mutex::new(device));
+}
 
-    let ether_addr = EthernetAddress(_net_dev.mac_address().0);
-    let eth0 = InterfaceWrapper::new("eth0", _net_dev, ether_addr);
+// 兼容性函数和工具
+pub use crate::stack::addr_utils::{
+    from_std_socket_addr as from_core_sockaddr, 
+    to_std_socket_addr as into_core_sockaddr
+};
 
-    let ip = IP.parse().expect("invalid IP address");
-    let gateway = GATEWAY.parse().expect("invalid gateway IP address");
-    eth0.setup_ip_addr(ip, IP_PREFIX);
-    eth0.setup_gateway(gateway);
+/// 添加多播组成员（暂时使用回环接口）
+pub fn add_membership(
+    multicast_addr: smoltcp::wire::IpAddress, 
+    _interface_addr: smoltcp::wire::IpAddress
+) -> NetResult<()> {
+    if let Some(stack) = NETWORK_STACK.try_get() {
+        stack.loopback_interface().join_multicast_group(multicast_addr, current_time())
+    } else {
+        Err(NetError::Internal)
+    }
+}
 
-    ETH0.init_by(eth0);
-    info!("created net interface {:?}:", ETH0.name());
-    info!("  ether:    {}", ETH0.ethernet_address());
-    info!("  ip:       {}/{}", ip, IP_PREFIX);
-    info!("  gateway:  {}", gateway);
+/// 网络性能基准测试：发送带宽
+pub fn bench_transmit() -> NetResult<u64> {
+    info!("开始发送带宽基准测试");
+    // TODO: 实现具体的发送带宽测试
+    Ok(0)
+}
 
-    SOCKET_SET.init_by(SocketSetWrapper::new());
-    LISTEN_TABLE.init_by(ListenTable::new());
+/// 网络性能基准测试：接收带宽  
+pub fn bench_receive() -> NetResult<u64> {
+    info!("开始接收带宽基准测试");
+    // TODO: 实现具体的接收带宽测试
+    Ok(0)
 }
