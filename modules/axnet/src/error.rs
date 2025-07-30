@@ -45,7 +45,7 @@ impl From<NetError> for AxError {
         match err {
             NetError::ConnectionRefused => AxError::ConnectionRefused,
             NetError::ConnectionReset => AxError::ConnectionReset,
-            NetError::Timeout => AxError::Timeout,
+            NetError::Timeout => AxError::WouldBlock, // 使用WouldBlock代替Timeout
             NetError::AddrInUse => AxError::AddrInUse,
             NetError::AddrNotAvailable => AxError::BadAddress,
             NetError::NetworkUnreachable => AxError::BadAddress,
@@ -67,7 +67,7 @@ impl From<AxError> for NetError {
         match err {
             AxError::ConnectionRefused => NetError::ConnectionRefused,
             AxError::ConnectionReset => NetError::ConnectionReset,
-            AxError::Timeout => NetError::Timeout,
+            AxError::WouldBlock => NetError::WouldBlock, // 移除Timeout映射
             AxError::AddrInUse => NetError::AddrInUse,
             AxError::BadAddress => NetError::AddrNotAvailable,
             AxError::WouldBlock => NetError::WouldBlock,

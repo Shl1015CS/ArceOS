@@ -111,11 +111,8 @@ impl SocketSetManager {
         F: FnOnce(&T) -> R,
     {
         let socket_set = self.socket_set.lock();
-        if let Some(socket) = socket_set.get::<T>(handle) {
-            f(socket)
-        } else {
-            panic!("Socket不存在");
-        }
+        let socket = socket_set.get::<T>(handle);
+        f(socket)
     }
 
     /// 使用TCP socket执行操作（可变）
@@ -125,11 +122,8 @@ impl SocketSetManager {
         F: FnOnce(&mut T) -> R,
     {
         let mut socket_set = self.socket_set.lock();
-        if let Some(socket) = socket_set.get_mut::<T>(handle) {
-            f(socket)
-        } else {
-            panic!("Socket不存在");
-        }
+        let socket = socket_set.get_mut::<T>(handle);
+        f(socket)
     }
 
     /// 使用整个socket集合执行操作（只读）
@@ -238,10 +232,9 @@ impl SocketSetManager {
         {
             let socket_set = self.socket_set.lock();
             for (&handle, info) in self.tcp_sockets.lock().iter() {
-                if let Some(socket) = socket_set.get::<tcp::Socket>(handle) {
-                    if !socket.is_active() && info.state != TcpState::Listening {
-                        to_remove.push(handle);
-                    }
+                let socket = socket_set.get::<tcp::Socket>(handle);
+                if !socket.is_active() && info.state != TcpState::Listening {
+                    to_remove.push(handle);
                 }
             }
         }
