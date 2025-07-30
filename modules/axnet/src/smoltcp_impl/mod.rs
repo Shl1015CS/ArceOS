@@ -186,7 +186,7 @@ impl NetworkStack {
 
 /// 获取当前时间戳
 pub fn current_time() -> Instant {
-    Instant::from_micros_const((axhal::time::current_time_nanos() / NANOS_PER_MICROS) as i64)
+    Instant::from_micros_const((axhal::time::current_time() / NANOS_PER_MICROS) as i64)
 }
 
 /// 初始化网络栈
