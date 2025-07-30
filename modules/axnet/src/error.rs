@@ -1,6 +1,6 @@
 //! 网络错误类型定义
 
-use axerrno::AxError;
+use axerrno::{AxError, LinuxError};
 
 /// 网络操作结果类型
 pub type NetResult<T> = Result<T, NetError>;
@@ -67,16 +67,59 @@ impl From<AxError> for NetError {
         match err {
             AxError::ConnectionRefused => NetError::ConnectionRefused,
             AxError::ConnectionReset => NetError::ConnectionReset,
-            AxError::WouldBlock => NetError::WouldBlock, // 移除Timeout映射
+            AxError::WouldBlock => NetError::WouldBlock,
             AxError::AddrInUse => NetError::AddrInUse,
             AxError::BadAddress => NetError::AddrNotAvailable,
-            AxError::WouldBlock => NetError::WouldBlock,
             AxError::InvalidInput => NetError::InvalidInput,
             AxError::NotConnected => NetError::NotConnected,
             AxError::AlreadyExists => NetError::AlreadyConnected,
             AxError::StorageFull => NetError::BufferFull,
             AxError::UnexpectedEof => NetError::BufferEmpty,
             AxError::Unsupported => NetError::Unsupported,
+            _ => NetError::Internal,
+        }
+    }
+}
+
+impl From<NetError> for LinuxError {
+    fn from(err: NetError) -> Self {
+        match err {
+            NetError::ConnectionRefused => LinuxError::ECONNREFUSED,
+            NetError::ConnectionReset => LinuxError::ECONNRESET,
+            NetError::Timeout => LinuxError::ETIMEDOUT,
+            NetError::AddrInUse => LinuxError::EADDRINUSE,
+            NetError::AddrNotAvailable => LinuxError::EADDRNOTAVAIL,
+            NetError::NetworkUnreachable => LinuxError::ENETUNREACH,
+            NetError::HostUnreachable => LinuxError::EHOSTUNREACH,
+            NetError::WouldBlock => LinuxError::EAGAIN,
+            NetError::InvalidInput => LinuxError::EINVAL,
+            NetError::NotConnected => LinuxError::ENOTCONN,
+            NetError::AlreadyConnected => LinuxError::EISCONN,
+            NetError::BufferFull => LinuxError::ENOBUFS,
+            NetError::BufferEmpty => LinuxError::ENODATA,
+            NetError::Unsupported => LinuxError::EOPNOTSUPP,
+            NetError::Internal => LinuxError::EIO,
+        }
+    }
+}
+
+impl From<LinuxError> for NetError {
+    fn from(err: LinuxError) -> Self {
+        match err {
+            LinuxError::ECONNREFUSED => NetError::ConnectionRefused,
+            LinuxError::ECONNRESET => NetError::ConnectionReset,
+            LinuxError::ETIMEDOUT => NetError::Timeout,
+            LinuxError::EADDRINUSE => NetError::AddrInUse,
+            LinuxError::EADDRNOTAVAIL => NetError::AddrNotAvailable,
+            LinuxError::ENETUNREACH => NetError::NetworkUnreachable,
+            LinuxError::EHOSTUNREACH => NetError::HostUnreachable,
+            LinuxError::EAGAIN => NetError::WouldBlock,
+            LinuxError::EINVAL => NetError::InvalidInput,
+            LinuxError::ENOTCONN => NetError::NotConnected,
+            LinuxError::EISCONN => NetError::AlreadyConnected,
+            LinuxError::ENOBUFS => NetError::BufferFull,
+            LinuxError::ENODATA => NetError::BufferEmpty,
+            LinuxError::EOPNOTSUPP => NetError::Unsupported,
             _ => NetError::Internal,
         }
     }
