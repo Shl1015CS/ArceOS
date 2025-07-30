@@ -128,39 +128,43 @@ impl TcpSocket {
 
             // 选择合适的接口
             let (local_endpoint, remote_endpoint) = if remote_endpoint.addr.as_bytes()[0] == 127 {
-                let interface = network_stack().loopback_interface().context();
-                network_stack()
-                    .socket_set()
-                    .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                        socket
-                            .connect(&*interface, remote_endpoint, bound_endpoint)
-                            .map_err(|e| match e {
-                                ConnectError::InvalidState => NetError::AlreadyConnected,
-                                ConnectError::Unaddressable => NetError::ConnectionRefused,
-                            })?;
-                        
-                        Ok::<(IpEndpoint, IpEndpoint), NetError>((
-                            socket.local_endpoint().unwrap(),
-                            socket.remote_endpoint().unwrap(),
-                        ))
-                    })?
+                let interface_ctx = network_stack().loopback_interface().context();
+                interface_ctx.with_interface_mut(|interface| {
+                    network_stack()
+                        .socket_set()
+                        .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                            socket
+                                .connect(interface, remote_endpoint, bound_endpoint)
+                                .map_err(|e| match e {
+                                    ConnectError::InvalidState => NetError::AlreadyConnected,
+                                    ConnectError::Unaddressable => NetError::ConnectionRefused,
+                                })?;
+                            
+                            Ok::<(IpEndpoint, IpEndpoint), NetError>((
+                                socket.local_endpoint().unwrap(),
+                                socket.remote_endpoint().unwrap(),
+                            ))
+                        })
+                })?
             } else {
-                let interface = network_stack().eth_interface().context();
-                network_stack()
-                    .socket_set()
-                    .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                        socket
-                            .connect(&*interface, remote_endpoint, bound_endpoint)
-                            .map_err(|e| match e {
-                                ConnectError::InvalidState => NetError::AlreadyConnected,
-                                ConnectError::Unaddressable => NetError::ConnectionRefused,
-                            })?;
-                        
-                        Ok::<(IpEndpoint, IpEndpoint), NetError>((
-                            socket.local_endpoint().unwrap(),
-                            socket.remote_endpoint().unwrap(),
-                        ))
-                    })?
+                let interface_ctx = network_stack().eth_interface().context();
+                interface_ctx.with_interface_mut(|interface| {
+                    network_stack()
+                        .socket_set()
+                        .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+                            socket
+                                .connect(interface, remote_endpoint, bound_endpoint)
+                                .map_err(|e| match e {
+                                    ConnectError::InvalidState => NetError::AlreadyConnected,
+                                    ConnectError::Unaddressable => NetError::ConnectionRefused,
+                                })?;
+                            
+                            Ok::<(IpEndpoint, IpEndpoint), NetError>((
+                                socket.local_endpoint().unwrap(),
+                                socket.remote_endpoint().unwrap(),
+                            ))
+                        })
+                })
             };
 
             unsafe {

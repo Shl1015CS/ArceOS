@@ -200,7 +200,9 @@ pub fn init_network_stack(net_dev: AxNetDevice) {
 
 /// 获取全局网络栈实例
 pub fn network_stack() -> &'static Arc<NetworkStack> {
-    NETWORK_STACK.get()
+    NETWORK_STACK.get_or_init(|| {
+        panic!("网络栈未初始化")
+    })
 }
 
 /// 轮询网络接口（公共接口）

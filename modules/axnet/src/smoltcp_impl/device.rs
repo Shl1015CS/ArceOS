@@ -10,6 +10,7 @@ use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 
 /// 以太网设备适配器
+#[derive(Clone)]
 pub struct EthernetDevice {
     inner: AxNetDevice,
     rx_buffer: Mutex<Vec<u8>>,
@@ -111,7 +112,11 @@ impl<'a> TxToken for EthernetTxToken<'a> {
         
         let result = f(&mut tx_buf);
         
-        let net_buf = axdriver_net::NetBufPtr::from_buf(tx_buf.as_ptr(), tx_buf.len());
+        let net_buf = axdriver_net::NetBufPtr::new(
+            core::ptr::NonNull::new(tx_buf.as_ptr() as *mut u8).unwrap(),
+            core::ptr::NonNull::new(tx_buf.as_ptr() as *mut u8).unwrap(),
+            tx_buf.len()
+        );
         if let Err(e) = self.device.transmit(net_buf) {
             warn!("发送数据包失败: {:?}", e);
         }
@@ -121,6 +126,7 @@ impl<'a> TxToken for EthernetTxToken<'a> {
 }
 
 /// 回环设备适配器
+#[derive(Clone)]
 pub struct LoopbackDevice {
     queue: Mutex<Vec<Vec<u8>>>,
 }

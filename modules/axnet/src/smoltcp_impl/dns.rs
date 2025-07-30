@@ -69,10 +69,12 @@ fn query_with_timeout(
     let query_handle = network_stack()
         .socket_set()
         .with_socket_mut::<dns::Socket, _, _>(handle, |socket| {
-            let mut interface = network_stack().eth_interface().lock();
-            socket
-                .start_query(&mut interface, domain, DnsQueryType::A)
-                .map_err(|_| NetError::Internal)
+            let interface_ctx = network_stack().eth_interface().context();
+            interface_ctx.with_interface_mut(|interface| {
+                socket
+                    .start_query(interface, domain, DnsQueryType::A)
+                    .map_err(|_| NetError::Internal)
+            })
         })?;
 
     // 轮询直到查询完成或超时

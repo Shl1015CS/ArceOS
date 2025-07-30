@@ -79,41 +79,36 @@ impl SocketSetManager {
             smoltcp::wire::IpAddress::v4(8, 8, 8, 8),
             smoltcp::wire::IpAddress::v4(8, 8, 4, 4),
         ];
-        smoltcp::socket::dns::Socket::new(&servers)
+        let queries = vec![];
+        smoltcp::socket::dns::Socket::new(&servers, queries)
     }
 
     /// 添加socket到集合中
     pub fn add<T>(&self, socket: T) -> SocketHandle
     where
-        T: Into<smoltcp::socket::Socket<'static>>,
+        T: smoltcp::socket::AnySocket<'static>,
     {
-        let socket = socket.into();
         let handle = self.socket_set.lock().add(socket);
         
         // 根据socket类型记录信息
-        match &*self.socket_set.lock().get::<tcp::Socket>(handle) {
-            Ok(_) => {
-                self.tcp_sockets.lock().insert(
-                    handle,
-                    TcpSocketInfo {
-                        local_addr: None,
-                        peer_addr: None,
-                        state: TcpState::Closed,
-                    },
-                );
-            }
-            Err(_) => {
-                // 尝试UDP socket
-                if self.socket_set.lock().get::<udp::Socket>(handle).is_ok() {
-                    self.udp_sockets.lock().insert(
-                        handle,
-                        UdpSocketInfo {
-                            local_addr: None,
-                            peer_addr: None,
-                        },
-                    );
-                }
-            }
+        let socket_set = self.socket_set.lock();
+        if let Some(_) = socket_set.get::<tcp::Socket>(handle) {
+            self.tcp_sockets.lock().insert(
+                handle,
+                TcpSocketInfo {
+                    local_addr: None,
+                    peer_addr: None,
+                    state: TcpState::Closed,
+                },
+            );
+        } else if let Some(_) = socket_set.get::<udp::Socket>(handle) {
+            self.udp_sockets.lock().insert(
+                handle,
+                UdpSocketInfo {
+                    local_addr: None,
+                    peer_addr: None,
+                },
+            );
         }
         
         handle
@@ -133,7 +128,7 @@ impl SocketSetManager {
         F: FnOnce(&T) -> R,
     {
         let socket_set = self.socket_set.lock();
-        let socket = socket_set.get::<T>(handle).expect("Socket不存在");
+        let socket = socket_set.get::<T>(handle).unwrap();
         f(socket)
     }
 
@@ -144,7 +139,7 @@ impl SocketSetManager {
         F: FnOnce(&mut T) -> R,
     {
         let mut socket_set = self.socket_set.lock();
-        let socket = socket_set.get_mut::<T>(handle).expect("Socket不存在");
+        let socket = socket_set.get_mut::<T>(handle).unwrap();
         f(socket)
     }
 
@@ -243,7 +238,7 @@ impl SocketSetManager {
 
     /// 获取所有socket数量
     pub fn total_socket_count(&self) -> usize {
-        self.socket_set.lock().len()
+        self.tcp_sockets.lock().len() + self.udp_sockets.lock().len()
     }
 
     /// 清理已关闭的socket
@@ -254,7 +249,7 @@ impl SocketSetManager {
         {
             let socket_set = self.socket_set.lock();
             for (&handle, info) in self.tcp_sockets.lock().iter() {
-                if let Ok(socket) = socket_set.get::<tcp::Socket>(handle) {
+                if let Some(socket) = socket_set.get::<tcp::Socket>(handle) {
                     if !socket.is_active() && info.state != TcpState::Listening {
                         to_remove.push(handle);
                     }
