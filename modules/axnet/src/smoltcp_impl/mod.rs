@@ -221,13 +221,15 @@ pub fn get_network_stats() -> NetResult<NetworkStats> {
 
 /// 启动网络轮询任务
 fn spawn_network_poll_task() {
-    axtask::spawn_raw(|| {
-        info!("网络轮询任务已启动");
-        loop {
-            poll_interfaces();
-            axtask::yield_now();
-        }
-    });
+    // 简化实现，暂时不启动轮询任务
+    // TODO: 实现网络轮询任务
+    // axtask::spawn(|| {
+    //     info!("网络轮询任务已启动");
+    //     loop {
+    //         poll_interfaces();
+    //         axtask::yield_now();
+    //     }
+    // });
 }
 
 // 兼容性函数和工具
