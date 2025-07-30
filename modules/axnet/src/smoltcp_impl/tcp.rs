@@ -3,7 +3,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use core::cell::UnsafeCell;
 use axio::{PollState, Read, Write};
-use axsync::Mutex;
+
 use axtask::yield_now;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp::{self, ConnectError, State};
@@ -130,11 +130,12 @@ impl TcpSocket {
             let (local_endpoint, remote_endpoint) = if remote_endpoint.addr.as_bytes()[0] == 127 {
                 let interface_ctx = network_stack().loopback_interface().context();
                 interface_ctx.with_interface_mut(|interface| {
+                    let mut ctx = smoltcp::iface::Context::new(interface, current_time());
                     network_stack()
                         .socket_set()
                         .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                             socket
-                                .connect(interface, remote_endpoint, bound_endpoint)
+                                .connect(&mut ctx, remote_endpoint, bound_endpoint)
                                 .map_err(|e| match e {
                                     ConnectError::InvalidState => NetError::AlreadyConnected,
                                     ConnectError::Unaddressable => NetError::ConnectionRefused,
@@ -149,11 +150,12 @@ impl TcpSocket {
             } else {
                 let interface_ctx = network_stack().eth_interface().context();
                 interface_ctx.with_interface_mut(|interface| {
+                    let mut ctx = smoltcp::iface::Context::new(interface, current_time());
                     network_stack()
                         .socket_set()
                         .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                             socket
-                                .connect(interface, remote_endpoint, bound_endpoint)
+                                .connect(&mut ctx, remote_endpoint, bound_endpoint)
                                 .map_err(|e| match e {
                                     ConnectError::InvalidState => NetError::AlreadyConnected,
                                     ConnectError::Unaddressable => NetError::ConnectionRefused,
@@ -164,7 +166,7 @@ impl TcpSocket {
                                 socket.remote_endpoint().unwrap(),
                             ))
                         })
-                })
+                })?
             };
 
             unsafe {

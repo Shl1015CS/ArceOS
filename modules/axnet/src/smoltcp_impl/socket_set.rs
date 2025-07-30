@@ -92,7 +92,7 @@ impl SocketSetManager {
         
         // 根据socket类型记录信息
         let socket_set = self.socket_set.lock();
-        if let Some(_) = socket_set.get::<tcp::Socket>(handle) {
+        if socket_set.get::<tcp::Socket>(handle).is_some() {
             self.tcp_sockets.lock().insert(
                 handle,
                 TcpSocketInfo {
@@ -101,7 +101,7 @@ impl SocketSetManager {
                     state: TcpState::Closed,
                 },
             );
-        } else if let Some(_) = socket_set.get::<udp::Socket>(handle) {
+        } else if socket_set.get::<udp::Socket>(handle).is_some() {
             self.udp_sockets.lock().insert(
                 handle,
                 UdpSocketInfo {
@@ -128,7 +128,7 @@ impl SocketSetManager {
         F: FnOnce(&T) -> R,
     {
         let socket_set = self.socket_set.lock();
-        let socket = socket_set.get::<T>(handle).unwrap();
+        let socket = socket_set.get::<T>(handle).expect("Socket不存在");
         f(socket)
     }
 
@@ -139,7 +139,7 @@ impl SocketSetManager {
         F: FnOnce(&mut T) -> R,
     {
         let mut socket_set = self.socket_set.lock();
-        let socket = socket_set.get_mut::<T>(handle).unwrap();
+        let socket = socket_set.get_mut::<T>(handle).expect("Socket不存在");
         f(socket)
     }
 

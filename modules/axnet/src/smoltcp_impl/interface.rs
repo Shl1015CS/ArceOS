@@ -26,11 +26,11 @@ impl EthernetInterface {
         net_dev: AxNetDevice,
         ethernet_addr: EthernetAddress,
     ) -> NetResult<Self> {
-        let device = EthernetDevice::new(net_dev);
+        let mut device = EthernetDevice::new(net_dev);
         let mut config = Config::new(HardwareAddress::Ethernet(ethernet_addr));
         config.random_seed = 0xA2CE_05A2_CE05_A2CE;
 
-        let interface = Interface::new(config, &mut device.clone(), super::current_time());
+        let interface = Interface::new(config, &mut device, super::current_time());
 
         Ok(Self {
             name,
@@ -135,10 +135,10 @@ pub struct LoopbackInterface {
 impl LoopbackInterface {
     /// 创建新的回环接口
     pub fn new() -> NetResult<Self> {
-        let device = LoopbackDevice::new();
+        let mut device = LoopbackDevice::new();
         let config = Config::new(HardwareAddress::Ip);
 
-        let mut interface = Interface::new(config, &mut device.clone(), super::current_time());
+        let mut interface = Interface::new(config, &mut device, super::current_time());
 
         // 设置回环地址
         interface
@@ -174,7 +174,7 @@ impl LoopbackInterface {
     /// 加入多播组
     pub fn join_multicast_group(
         &self,
-        multicast_addr: IpAddress,
+        _multicast_addr: IpAddress,
         _timestamp: Instant,
     ) -> NetResult<()> {
         // 简化实现，暂时返回成功

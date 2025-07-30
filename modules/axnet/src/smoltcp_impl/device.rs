@@ -10,7 +10,6 @@ use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 
 /// 以太网设备适配器
-#[derive(Clone)]
 pub struct EthernetDevice {
     inner: AxNetDevice,
     rx_buffer: Mutex<Vec<u8>>,
@@ -126,7 +125,6 @@ impl<'a> TxToken for EthernetTxToken<'a> {
 }
 
 /// 回环设备适配器
-#[derive(Clone)]
 pub struct LoopbackDevice {
     queue: Mutex<Vec<Vec<u8>>>,
 }

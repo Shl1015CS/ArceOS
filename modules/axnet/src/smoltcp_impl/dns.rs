@@ -71,8 +71,9 @@ fn query_with_timeout(
         .with_socket_mut::<dns::Socket, _, _>(handle, |socket| {
             let interface_ctx = network_stack().eth_interface().context();
             interface_ctx.with_interface_mut(|interface| {
+                let mut ctx = smoltcp::iface::Context::new(interface, current_time());
                 socket
-                    .start_query(interface, domain, DnsQueryType::A)
+                    .start_query(&mut ctx, domain, DnsQueryType::A)
                     .map_err(|_| NetError::Internal)
             })
         })?;
@@ -93,10 +94,10 @@ fn query_with_timeout(
                 for addr in addresses {
                     match addr {
                         IpAddress::Ipv4(ipv4) => {
-                            ips.push(IpAddr::V4(Ipv4Addr::from(ipv4.0)));
+                            ips.push(IpAddr::V4(core::net::Ipv4Addr::from(ipv4.0)));
                         }
                         IpAddress::Ipv6(ipv6) => {
-                            ips.push(IpAddr::V6(Ipv6Addr::from(ipv6.0)));
+                            ips.push(IpAddr::V6(core::net::Ipv6Addr::from(ipv6.0)));
                         }
                     }
                 }
@@ -125,7 +126,7 @@ pub fn dns_query_ipv4(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv4Address>> 
     let ipv4_addrs = addrs
         .into_iter()
         .filter_map(|addr| match addr {
-            IpAddr::V4(ipv4) => Some(Ipv4Address::from(ipv4)),
+            IpAddr::V4(ipv4) => Some(Ipv4Address(ipv4.octets())),
             _ => None,
         })
         .collect();
@@ -138,7 +139,7 @@ pub fn dns_query_ipv6(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv6Address>> 
     let ipv6_addrs = addrs
         .into_iter()
         .filter_map(|addr| match addr {
-            IpAddr::V6(ipv6) => Some(Ipv6Address::from(ipv6)),
+            IpAddr::V6(ipv6) => Some(Ipv6Address(ipv6.octets())),
             _ => None,
         })
         .collect();

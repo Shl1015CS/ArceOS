@@ -200,9 +200,7 @@ pub fn init_network_stack(net_dev: AxNetDevice) {
 
 /// 获取全局网络栈实例
 pub fn network_stack() -> &'static Arc<NetworkStack> {
-    NETWORK_STACK.get_or_init(|| {
-        panic!("网络栈未初始化")
-    })
+    NETWORK_STACK.try_get().expect("网络栈未初始化")
 }
 
 /// 轮询网络接口（公共接口）
@@ -235,10 +233,10 @@ fn spawn_network_poll_task() {
 }
 
 // 兼容性函数和工具
-pub use crate::stack::addr_utils::{
-    from_std_socket_addr as from_core_sockaddr, 
-    to_std_socket_addr as into_core_sockaddr
-};
+// pub use crate::stack::addr_utils::{
+//     from_std_socket_addr as from_core_sockaddr, 
+//     to_std_socket_addr as into_core_sockaddr
+// };
 
 /// 添加多播组成员（暂时使用回环接口）
 pub fn add_membership(
