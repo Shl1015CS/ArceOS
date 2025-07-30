@@ -186,7 +186,7 @@ impl NetworkStack {
 
 /// 获取当前时间戳
 pub fn current_time() -> Instant {
-    Instant::from_micros_const((axhal::time::current_time() / NANOS_PER_MICROS) as i64)
+    Instant::from_micros_const((axhal::time::current_ticks() / NANOS_PER_MICROS) as i64)
 }
 
 /// 初始化网络栈
@@ -221,7 +221,7 @@ pub fn get_network_stats() -> NetResult<NetworkStats> {
 
 /// 启动网络轮询任务
 fn spawn_network_poll_task() {
-    axtask::spawn(|| {
+    axtask::spawn_raw(|| {
         info!("网络轮询任务已启动");
         loop {
             poll_interfaces();

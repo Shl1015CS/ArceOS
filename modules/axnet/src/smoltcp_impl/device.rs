@@ -35,7 +35,7 @@ impl EthernetDevice {
 
 impl Device for EthernetDevice {
     type RxToken<'a> = EthernetRxToken where Self: 'a;
-    type TxToken<'a> = EthernetTxToken where Self: 'a;
+    type TxToken<'a> = EthernetTxToken<'a> where Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let mut rx_buf = self.rx_buffer.lock();
@@ -111,7 +111,7 @@ impl<'a> TxToken for EthernetTxToken<'a> {
         
         let result = f(&mut tx_buf);
         
-        let net_buf = axdriver_net::NetBufPtr::from_buf_vec(tx_buf.clone());
+        let net_buf = axdriver_net::NetBufPtr::from_buf(tx_buf.as_ptr(), tx_buf.len());
         if let Err(e) = self.device.transmit(net_buf) {
             warn!("发送数据包失败: {:?}", e);
         }
@@ -136,7 +136,7 @@ impl LoopbackDevice {
 
 impl Device for LoopbackDevice {
     type RxToken<'a> = LoopbackRxToken where Self: 'a;
-    type TxToken<'a> = LoopbackTxToken where Self: 'a;
+    type TxToken<'a> = LoopbackTxToken<'a> where Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let mut queue = self.queue.lock();

@@ -91,10 +91,10 @@ fn query_with_timeout(
                 for addr in addresses {
                     match addr {
                         IpAddress::Ipv4(ipv4) => {
-                            ips.push(IpAddr::V4(Ipv4Addr::from(ipv4)));
+                            ips.push(IpAddr::V4(Ipv4Addr::from(ipv4.0)));
                         }
                         IpAddress::Ipv6(ipv6) => {
-                            ips.push(IpAddr::V6(Ipv6Addr::from(ipv6)));
+                            ips.push(IpAddr::V6(Ipv6Addr::from(ipv6.0)));
                         }
                     }
                 }
