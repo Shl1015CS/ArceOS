@@ -62,10 +62,9 @@ impl EthernetInterface {
             .lock()
             .update_ip_addrs(|ip_addrs| {
                 ip_addrs.clear();
-                ip_addrs.push(cidr).map_err(|_| NetError::Internal)?;
-                Ok(())
-            })
-            .map_err(|_| NetError::Internal)
+                let _ = ip_addrs.push(cidr);
+            });
+        Ok(())
     }
 
     /// 设置网关

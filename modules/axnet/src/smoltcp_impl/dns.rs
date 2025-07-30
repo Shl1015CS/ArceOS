@@ -2,10 +2,11 @@
 //!
 //! 提供域名解析服务，支持A记录和AAAA记录查询
 
+use alloc::vec;
 use alloc::vec::Vec;
-use core::net::IpAddr;
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use smoltcp::socket::dns;
-use smoltcp::wire::{DnsQueryType, IpAddress};
+use smoltcp::wire::{DnsQueryType, IpAddress, Ipv4Address, Ipv6Address};
 
 use crate::error::{NetError, NetResult};
 use super::{network_stack, current_time, socket_set::SocketSetManager};
@@ -62,15 +63,15 @@ fn query_with_timeout(
     timeout_ms: u64,
 ) -> NetResult<Vec<IpAddr>> {
     let start_time = current_time();
-    let timeout = smoltcp::time::Duration::from_millis(timeout_ms as i64);
+    let timeout = smoltcp::time::Duration::from_millis(timeout_ms);
 
     // 启动A记录查询
     let query_handle = network_stack()
         .socket_set()
         .with_socket_mut::<dns::Socket, _, _>(handle, |socket| {
-            let interface = network_stack().eth_interface().context();
+            let mut interface = network_stack().eth_interface().lock();
             socket
-                .start_query(&*interface.lock(), domain, DnsQueryType::A)
+                .start_query(&mut interface, domain, DnsQueryType::A)
                 .map_err(|_| NetError::Internal)
         })?;
 
@@ -90,10 +91,10 @@ fn query_with_timeout(
                 for addr in addresses {
                     match addr {
                         IpAddress::Ipv4(ipv4) => {
-                            ips.push(IpAddr::V4(ipv4.0.into()));
+                            ips.push(IpAddr::V4(Ipv4Addr::from(ipv4)));
                         }
                         IpAddress::Ipv6(ipv6) => {
-                            ips.push(IpAddr::V6(ipv6.0.into()));
+                            ips.push(IpAddr::V6(Ipv6Addr::from(ipv6)));
                         }
                     }
                 }
@@ -122,7 +123,7 @@ pub fn dns_query_ipv4(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv4Address>> 
     let ipv4_addrs = addrs
         .into_iter()
         .filter_map(|addr| match addr {
-            IpAddr::V4(ipv4) => Some(smoltcp::wire::Ipv4Address::from(ipv4)),
+            IpAddr::V4(ipv4) => Some(Ipv4Address::from(ipv4)),
             _ => None,
         })
         .collect();
@@ -135,7 +136,7 @@ pub fn dns_query_ipv6(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv6Address>> 
     let ipv6_addrs = addrs
         .into_iter()
         .filter_map(|addr| match addr {
-            IpAddr::V6(ipv6) => Some(smoltcp::wire::Ipv6Address::from(ipv6)),
+            IpAddr::V6(ipv6) => Some(Ipv6Address::from(ipv6)),
             _ => None,
         })
         .collect();

@@ -2,6 +2,7 @@
 //!
 //! 为smoltcp提供设备抽象层，包括以太网设备和回环设备
 
+use alloc::vec;
 use alloc::vec::Vec;
 use axdriver::prelude::*;
 use axsync::Mutex;
@@ -9,7 +10,6 @@ use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 
 /// 以太网设备适配器
-#[derive(Clone)]
 pub struct EthernetDevice {
     inner: AxNetDevice,
     rx_buffer: Mutex<Vec<u8>>,
@@ -42,17 +42,23 @@ impl Device for EthernetDevice {
         rx_buf.clear();
         rx_buf.resize(1536, 0);
 
-        match self.inner.receive(&mut rx_buf) {
-            Ok(len) if len > 0 => {
-                rx_buf.truncate(len);
-                let rx_token = EthernetRxToken {
-                    buffer: rx_buf.clone(),
-                };
-                let tx_token = EthernetTxToken {
-                    device: self.inner.clone(),
-                    buffer: self.tx_buffer.clone(),
-                };
-                Some((rx_token, tx_token))
+        match self.inner.receive() {
+            Ok(net_buf) => {
+                let len = net_buf.packet_len();
+                if len > 0 {
+                    rx_buf.clear();
+                    rx_buf.extend_from_slice(net_buf.packet());
+                    let rx_token = EthernetRxToken {
+                        buffer: rx_buf.clone(),
+                    };
+                    let tx_token = EthernetTxToken {
+                        device: &mut self.inner,
+                        buffer: &self.tx_buffer,
+                    };
+                    Some((rx_token, tx_token))
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -60,8 +66,8 @@ impl Device for EthernetDevice {
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
         Some(EthernetTxToken {
-            device: self.inner.clone(),
-            buffer: self.tx_buffer.clone(),
+            device: &mut self.inner,
+            buffer: &self.tx_buffer,
         })
     }
 
@@ -89,12 +95,12 @@ impl RxToken for EthernetRxToken {
 }
 
 /// 以太网发送令牌
-pub struct EthernetTxToken {
-    device: AxNetDevice,
-    buffer: Mutex<Vec<u8>>,
+pub struct EthernetTxToken<'a> {
+    device: &'a mut AxNetDevice,
+    buffer: &'a Mutex<Vec<u8>>,
 }
 
-impl TxToken for EthernetTxToken {
+impl<'a> TxToken for EthernetTxToken<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -105,7 +111,8 @@ impl TxToken for EthernetTxToken {
         
         let result = f(&mut tx_buf);
         
-        if let Err(e) = self.device.transmit(&tx_buf) {
+        let net_buf = axdriver_net::NetBufPtr::from_buf_vec(tx_buf.clone());
+        if let Err(e) = self.device.transmit(net_buf) {
             warn!("发送数据包失败: {:?}", e);
         }
         
@@ -114,7 +121,6 @@ impl TxToken for EthernetTxToken {
 }
 
 /// 回环设备适配器
-#[derive(Clone)]
 pub struct LoopbackDevice {
     queue: Mutex<Vec<Vec<u8>>>,
 }
@@ -137,7 +143,7 @@ impl Device for LoopbackDevice {
         if let Some(packet) = queue.pop() {
             let rx_token = LoopbackRxToken { buffer: packet };
             let tx_token = LoopbackTxToken {
-                queue: self.queue.clone(),
+                queue: &self.queue,
             };
             Some((rx_token, tx_token))
         } else {
@@ -147,7 +153,7 @@ impl Device for LoopbackDevice {
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
         Some(LoopbackTxToken {
-            queue: self.queue.clone(),
+            queue: &self.queue,
         })
     }
 
@@ -175,11 +181,11 @@ impl RxToken for LoopbackRxToken {
 }
 
 /// 回环发送令牌
-pub struct LoopbackTxToken {
-    queue: Mutex<Vec<Vec<u8>>>,
+pub struct LoopbackTxToken<'a> {
+    queue: &'a Mutex<Vec<Vec<u8>>>,
 }
 
-impl TxToken for LoopbackTxToken {
+impl<'a> TxToken for LoopbackTxToken<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
