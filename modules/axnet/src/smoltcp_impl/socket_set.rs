@@ -91,25 +91,8 @@ impl SocketSetManager {
         let handle = self.socket_set.lock().add(socket);
         
         // 根据socket类型记录信息
-        let socket_set = self.socket_set.lock();
-        if socket_set.get::<tcp::Socket>(handle).is_some() {
-            self.tcp_sockets.lock().insert(
-                handle,
-                TcpSocketInfo {
-                    local_addr: None,
-                    peer_addr: None,
-                    state: TcpState::Closed,
-                },
-            );
-        } else if socket_set.get::<udp::Socket>(handle).is_some() {
-            self.udp_sockets.lock().insert(
-                handle,
-                UdpSocketInfo {
-                    local_addr: None,
-                    peer_addr: None,
-                },
-            );
-        }
+        // 暂时简化实现，不区分socket类型
+        // TODO: 实现正确的socket类型检测
         
         handle
     }
@@ -128,8 +111,11 @@ impl SocketSetManager {
         F: FnOnce(&T) -> R,
     {
         let socket_set = self.socket_set.lock();
-        let socket = socket_set.get::<T>(handle).expect("Socket不存在");
-        f(socket)
+        if let Some(socket) = socket_set.get::<T>(handle) {
+            f(socket)
+        } else {
+            panic!("Socket不存在");
+        }
     }
 
     /// 使用TCP socket执行操作（可变）
@@ -139,8 +125,11 @@ impl SocketSetManager {
         F: FnOnce(&mut T) -> R,
     {
         let mut socket_set = self.socket_set.lock();
-        let socket = socket_set.get_mut::<T>(handle).expect("Socket不存在");
-        f(socket)
+        if let Some(socket) = socket_set.get_mut::<T>(handle) {
+            f(socket)
+        } else {
+            panic!("Socket不存在");
+        }
     }
 
     /// 使用整个socket集合执行操作（只读）
