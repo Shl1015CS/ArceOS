@@ -1,42 +1,42 @@
-//! 网络错误类型定义
+//! Network error type definitions
 
 use axerrno::{AxError, LinuxError};
 
-/// 网络操作结果类型
+/// Network operation result type
 pub type NetResult<T> = Result<T, NetError>;
 
-/// 网络错误类型
+/// Network error type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetError {
-    /// 连接被拒绝
+    /// Connection refused
     ConnectionRefused,
-    /// 连接被重置
+    /// Connection reset
     ConnectionReset,
-    /// 连接超时
+    /// Connection timeout
     Timeout,
-    /// 地址已被使用
+    /// Address already in use
     AddrInUse,
-    /// 地址不可达
+    /// Address not available
     AddrNotAvailable,
-    /// 网络不可达
+    /// Network unreachable
     NetworkUnreachable,
-    /// 主机不可达
+    /// Host unreachable
     HostUnreachable,
-    /// 操作会阻塞
+    /// Operation would block
     WouldBlock,
-    /// 无效参数
+    /// Invalid input
     InvalidInput,
-    /// 未连接
+    /// Not connected
     NotConnected,
-    /// 已连接
+    /// Already connected
     AlreadyConnected,
-    /// 缓冲区已满
+    /// Buffer full
     BufferFull,
-    /// 缓冲区为空
+    /// Buffer empty
     BufferEmpty,
-    /// 不支持的操作
+    /// Unsupported operation
     Unsupported,
-    /// 内部错误
+    /// Internal error
     Internal,
 }
 
@@ -45,7 +45,7 @@ impl From<NetError> for AxError {
         match err {
             NetError::ConnectionRefused => AxError::ConnectionRefused,
             NetError::ConnectionReset => AxError::ConnectionReset,
-            NetError::Timeout => AxError::WouldBlock, // 使用WouldBlock代替Timeout
+            NetError::Timeout => AxError::WouldBlock, // Use WouldBlock instead of Timeout
             NetError::AddrInUse => AxError::AddrInUse,
             NetError::AddrNotAvailable => AxError::BadAddress,
             NetError::NetworkUnreachable => AxError::BadAddress,

@@ -1,6 +1,6 @@
-//! Socket集合管理器
+//! Socket set manager
 //!
-//! 管理所有的TCP和UDP socket，提供统一的socket操作接口
+//! Manages all TCP and UDP sockets, provides unified socket operation interface
 
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -12,14 +12,14 @@ use smoltcp::wire::{IpAddress, IpEndpoint};
 
 use crate::error::{NetError, NetResult};
 
-/// Socket集合管理器
+/// Socket set manager
 pub struct SocketSetManager {
     socket_set: Mutex<SocketSet<'static>>,
     tcp_sockets: Mutex<BTreeMap<SocketHandle, TcpSocketInfo>>,
     udp_sockets: Mutex<BTreeMap<SocketHandle, UdpSocketInfo>>,
 }
 
-/// TCP Socket信息
+/// TCP Socket information
 #[derive(Debug, Clone)]
 struct TcpSocketInfo {
     local_addr: Option<IpEndpoint>,
@@ -27,14 +27,14 @@ struct TcpSocketInfo {
     state: TcpState,
 }
 
-/// UDP Socket信息
+/// UDP Socket information
 #[derive(Debug, Clone)]
 struct UdpSocketInfo {
     local_addr: Option<IpEndpoint>,
     peer_addr: Option<IpEndpoint>,
 }
 
-/// TCP连接状态
+/// TCP connection state
 #[derive(Debug, Clone, PartialEq)]
 enum TcpState {
     Closed,
@@ -44,7 +44,7 @@ enum TcpState {
 }
 
 impl SocketSetManager {
-    /// 创建新的Socket集合管理器
+    /// Create new Socket set manager
     pub fn new() -> Self {
         Self {
             socket_set: Mutex::new(SocketSet::new(vec![])),
@@ -53,14 +53,14 @@ impl SocketSetManager {
         }
     }
 
-    /// 创建新的TCP socket
+    /// Create new TCP socket
     pub fn new_tcp_socket() -> tcp::Socket<'static> {
         let rx_buffer = tcp::SocketBuffer::new(vec![0; 65536]);
         let tx_buffer = tcp::SocketBuffer::new(vec![0; 65536]);
         tcp::Socket::new(rx_buffer, tx_buffer)
     }
 
-    /// 创建新的UDP socket
+    /// Create new UDP socket
     pub fn new_udp_socket() -> udp::Socket<'static> {
         let rx_buffer = udp::PacketBuffer::new(
             vec![udp::PacketMetadata::EMPTY; 16],
@@ -73,7 +73,7 @@ impl SocketSetManager {
         udp::Socket::new(rx_buffer, tx_buffer)
     }
 
-    /// 创建新的DNS socket
+    /// Create new DNS socket
     pub fn new_dns_socket() -> smoltcp::socket::dns::Socket<'static> {
         let servers = [
             smoltcp::wire::IpAddress::v4(8, 8, 8, 8),
@@ -83,28 +83,28 @@ impl SocketSetManager {
         smoltcp::socket::dns::Socket::new(&servers, queries)
     }
 
-    /// 添加socket到集合中
+    /// Add socket to set
     pub fn add<T>(&self, socket: T) -> SocketHandle
     where
         T: smoltcp::socket::AnySocket<'static>,
     {
         let handle = self.socket_set.lock().add(socket);
         
-        // 根据socket类型记录信息
-        // 暂时简化实现，不区分socket类型
-        // TODO: 实现正确的socket类型检测
+        // Record information based on socket type
+        // Temporarily simplified implementation, not distinguishing socket types
+        // TODO: Implement proper socket type detection
         
         handle
     }
 
-    /// 从集合中移除socket
+    /// Remove socket from set
     pub fn remove(&self, handle: SocketHandle) {
         self.socket_set.lock().remove(handle);
         self.tcp_sockets.lock().remove(&handle);
         self.udp_sockets.lock().remove(&handle);
     }
 
-    /// 使用TCP socket执行操作（只读）
+    /// Execute operation with TCP socket (read-only)
     pub fn with_socket<T, F, R>(&self, handle: SocketHandle, f: F) -> R
     where
         T: smoltcp::socket::AnySocket<'static>,
@@ -115,7 +115,7 @@ impl SocketSetManager {
         f(socket)
     }
 
-    /// 使用TCP socket执行操作（可变）
+    /// Execute operation with TCP socket (mutable)
     pub fn with_socket_mut<T, F, R>(&self, handle: SocketHandle, f: F) -> R
     where
         T: smoltcp::socket::AnySocket<'static>,
@@ -126,7 +126,7 @@ impl SocketSetManager {
         f(socket)
     }
 
-    /// 使用整个socket集合执行操作（只读）
+    /// Execute operation with entire socket set (read-only)
     pub fn with_socket_set<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&SocketSet) -> R,
@@ -134,7 +134,7 @@ impl SocketSetManager {
         f(&*self.socket_set.lock())
     }
 
-    /// 使用整个socket集合执行操作（可变）
+    /// Execute operation with entire socket set (mutable)
     pub fn with_socket_set_mut<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut SocketSet) -> R,
@@ -142,9 +142,9 @@ impl SocketSetManager {
         f(&mut *self.socket_set.lock())
     }
 
-    /// 检查地址绑定冲突
+    /// Check address binding conflict
     pub fn check_bind_conflict(&self, addr: IpAddress, port: u16) -> NetResult<()> {
-        // 检查TCP socket冲突
+        // Check TCP socket conflict
         for info in self.tcp_sockets.lock().values() {
             if let Some(local_addr) = info.local_addr {
                 if local_addr.port == port {
@@ -155,7 +155,7 @@ impl SocketSetManager {
             }
         }
 
-        // 检查UDP socket冲突
+        // Check UDP socket conflict
         for info in self.udp_sockets.lock().values() {
             if let Some(local_addr) = info.local_addr {
                 if local_addr.port == port {
@@ -169,7 +169,7 @@ impl SocketSetManager {
         Ok(())
     }
 
-    /// 更新TCP socket信息
+    /// Update TCP socket information
     pub fn update_tcp_socket_info(
         &self,
         handle: SocketHandle,
@@ -188,7 +188,7 @@ impl SocketSetManager {
         }
     }
 
-    /// 更新UDP socket信息
+    /// Update UDP socket information
     pub fn update_udp_socket_info(
         &self,
         handle: SocketHandle,
@@ -205,7 +205,7 @@ impl SocketSetManager {
         }
     }
 
-    /// 获取TCP连接数量
+    /// Get TCP connection count
     pub fn tcp_connection_count(&self) -> usize {
         self.tcp_sockets
             .lock()
@@ -214,21 +214,21 @@ impl SocketSetManager {
             .count()
     }
 
-    /// 获取UDP socket数量
+    /// Get UDP socket count
     pub fn udp_socket_count(&self) -> usize {
         self.udp_sockets.lock().len()
     }
 
-    /// 获取所有socket数量
+    /// Get total socket count
     pub fn total_socket_count(&self) -> usize {
         self.tcp_sockets.lock().len() + self.udp_sockets.lock().len()
     }
 
-    /// 清理已关闭的socket
+    /// Clean up closed sockets
     pub fn cleanup_closed_sockets(&self) {
         let mut to_remove = Vec::new();
         
-        // 检查TCP socket
+        // Check TCP sockets
         {
             let socket_set = self.socket_set.lock();
             for (&handle, info) in self.tcp_sockets.lock().iter() {
@@ -239,7 +239,7 @@ impl SocketSetManager {
             }
         }
         
-        // 移除已关闭的socket
+        // Remove closed sockets
         for handle in to_remove {
             self.remove(handle);
         }

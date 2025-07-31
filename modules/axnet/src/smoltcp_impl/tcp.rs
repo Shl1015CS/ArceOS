@@ -1,4 +1,4 @@
-//! TCP Socket 实现
+//! TCP Socket implementation
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use core::cell::UnsafeCell;
@@ -13,20 +13,20 @@ use crate::error::{NetError, NetResult};
 use crate::stack::{SocketAddr, addr_utils::*};
 use super::{network_stack, current_time};
 
-// TCP Socket 状态
+// TCP Socket states
 const STATE_CLOSED: u8 = 0;
 const STATE_BUSY: u8 = 1;
 const STATE_CONNECTING: u8 = 2;
 const STATE_CONNECTED: u8 = 3;
 const STATE_LISTENING: u8 = 4;
 
-/// TCP Socket 实现
+/// TCP Socket implementation
 /// 
-/// 提供 POSIX 风格的 TCP socket API，支持：
-/// - 客户端连接：`connect`
-/// - 服务端监听：`bind`, `listen`, `accept`
-/// - 数据传输：`send`, `recv`
-/// - 非阻塞模式和地址重用
+/// Provides POSIX-style TCP socket API, supporting:
+/// - Client connection: `connect`
+/// - Server listening: `bind`, `listen`, `accept`
+/// - Data transmission: `send`, `recv`
+/// - Non-blocking mode and address reuse
 pub struct TcpSocket {
     state: AtomicU8,
     handle: UnsafeCell<Option<SocketHandle>>,
@@ -39,7 +39,7 @@ pub struct TcpSocket {
 unsafe impl Sync for TcpSocket {}
 
 impl TcpSocket {
-    /// 创建新的 TCP socket
+    /// Create new TCP socket
     pub const fn new() -> Self {
         Self {
             state: AtomicU8::new(STATE_CLOSED),
@@ -51,7 +51,7 @@ impl TcpSocket {
         }
     }
 
-    /// 创建已连接的 TCP socket（内部使用）
+    /// Create connected TCP socket (internal use)
     const fn new_connected(
         handle: SocketHandle,
         local_addr: IpEndpoint,
@@ -67,7 +67,7 @@ impl TcpSocket {
         }
     }
 
-    /// 获取本地地址和端口
+    /// Get local address and port
     pub fn local_addr(&self) -> NetResult<SocketAddr> {
         match self.get_state() {
             STATE_CONNECTED | STATE_LISTENING | STATE_CLOSED => {
@@ -82,7 +82,7 @@ impl TcpSocket {
         }
     }
 
-    /// 获取远程地址和端口
+    /// Get remote address and port
     pub fn peer_addr(&self) -> NetResult<SocketAddr> {
         match self.get_state() {
             STATE_CONNECTED => {
@@ -93,27 +93,27 @@ impl TcpSocket {
         }
     }
 
-    /// 检查是否为非阻塞模式
+    /// Check if in non-blocking mode
     pub fn is_nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Acquire)
     }
 
-    /// 设置非阻塞模式
+    /// Set non-blocking mode
     pub fn set_nonblocking(&self, nonblocking: bool) {
         self.nonblock.store(nonblocking, Ordering::Release);
     }
 
-    /// 检查是否启用地址重用
+    /// Check if address reuse is enabled
     pub fn is_reuse_addr(&self) -> bool {
         self.reuse_addr.load(Ordering::Acquire)
     }
 
-    /// 设置地址重用
+    /// Set address reuse
     pub fn set_reuse_addr(&self, reuse_addr: bool) {
         self.reuse_addr.store(reuse_addr, Ordering::Release);
     }
 
-    /// 连接到远程地址
+    /// Connect to remote address
     pub fn connect(&self, remote_addr: SocketAddr) -> NetResult<()> {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             let handle = unsafe { self.handle.get().read() }
@@ -126,13 +126,13 @@ impl TcpSocket {
             let remote_endpoint = from_std_socket_addr(remote_addr);
             let bound_endpoint = self.bound_endpoint()?;
 
-            // 暂时简化连接实现
-            // TODO: 实现正确的TCP连接逻辑
+            // Temporarily simplified connection implementation
+            // TODO: Implement proper TCP connection logic
             let local_endpoint = IpEndpoint::new(
                 if remote_endpoint.addr.as_bytes()[0] == 127 {
                     IpAddress::v4(127, 0, 0, 1)
                 } else {
-                    IpAddress::v4(10, 0, 2, 15) // 使用默认本地IP
+                    IpAddress::v4(10, 0, 2, 15) // Use default local IP
                 },
                 bound_endpoint.port
             );
@@ -146,7 +146,7 @@ impl TcpSocket {
         })
         .unwrap_or_else(|_| Err(NetError::AlreadyConnected))?;
 
-        // 让出 CPU 时间给服务端处理
+        // Yield CPU time for server processing
         yield_now();
 
         if self.is_nonblocking() {
@@ -165,7 +165,7 @@ impl TcpSocket {
         }
     }
 
-    /// 绑定到本地地址
+    /// Bind to local address
     pub fn bind(&self, mut local_addr: SocketAddr) -> NetResult<()> {
         self.update_state(STATE_CLOSED, STATE_CLOSED, || {
             if local_addr.port() == 0 {
@@ -179,7 +179,7 @@ impl TcpSocket {
 
             let local_endpoint = from_std_socket_addr(local_addr);
             
-            // 检查地址冲突
+            // Check address conflict
             if !self.is_reuse_addr() {
                 network_stack()
                     .socket_set()
@@ -210,7 +210,7 @@ impl TcpSocket {
         .unwrap_or_else(|_| Err(NetError::AlreadyConnected))
     }
 
-    /// 开始监听连接
+    /// Start listening for connections
     pub fn listen(&self) -> NetResult<()> {
         self.update_state(STATE_CLOSED, STATE_LISTENING, || {
             let bound_endpoint = self.bound_endpoint()?;
@@ -220,13 +220,13 @@ impl TcpSocket {
             }
             
             network_stack().listen_table().listen(bound_endpoint)?;
-            debug!("TCP socket 开始监听 {}", bound_endpoint);
+            debug!("TCP socket started listening on {}", bound_endpoint);
             Ok(())
         })
-        .unwrap_or(Ok(())) // 忽略重复监听
+        .unwrap_or(Ok(())) // Ignore duplicate listen
     }
 
-    /// 接受新连接
+    /// Accept new connection
     pub fn accept(&self) -> NetResult<TcpSocket> {
         if !self.is_listening() {
             return Err(NetError::InvalidInput);
@@ -236,12 +236,12 @@ impl TcpSocket {
         self.block_on(|| {
             let (handle, (local_addr, peer_addr)) = 
                 network_stack().listen_table().accept(local_port)?;
-            debug!("TCP socket 接受新连接 {}", peer_addr);
+            debug!("TCP socket accepted new connection {}", peer_addr);
             Ok(TcpSocket::new_connected(handle, local_addr, peer_addr))
         })
     }
 
-    /// 发送数据
+    /// Send data
     pub fn send(&self, buf: &[u8]) -> NetResult<usize> {
         if self.is_connecting() {
             return Err(NetError::WouldBlock);
@@ -268,7 +268,7 @@ impl TcpSocket {
         })
     }
 
-    /// 接收数据
+    /// Receive data
     pub fn recv(&self, buf: &mut [u8]) -> NetResult<usize> {
         if self.is_connecting() {
             return Err(NetError::WouldBlock);
@@ -289,7 +289,7 @@ impl TcpSocket {
                     } else if !socket.is_active() {
                         Err(NetError::ConnectionRefused)
                     } else if !socket.may_recv() {
-                        Ok(0) // 连接已关闭
+                        Ok(0) // Connection closed
                     } else {
                         Err(NetError::WouldBlock)
                     }
@@ -297,15 +297,15 @@ impl TcpSocket {
         })
     }
 
-    /// 关闭连接
+    /// Close connection
     pub fn shutdown(&self) -> NetResult<()> {
-        // 关闭流连接
+        // Close stream connection
         self.update_state(STATE_CONNECTED, STATE_CLOSED, || {
             let handle = unsafe { self.handle.get().read().unwrap() };
             network_stack()
                 .socket_set()
                 .with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                    debug!("TCP socket {}: 关闭连接", handle);
+                    debug!("TCP socket {}: closing connection", handle);
                     socket.close();
                 });
             unsafe { 
@@ -317,7 +317,7 @@ impl TcpSocket {
         })
         .unwrap_or(Ok(()))?;
 
-        // 关闭监听
+        // Close listening
         self.update_state(STATE_LISTENING, STATE_CLOSED, || {
             let local_port = unsafe { self.local_addr.get().read().port };
             unsafe { self.local_addr.get().write(UNSPECIFIED_ENDPOINT); }
@@ -330,7 +330,7 @@ impl TcpSocket {
         Ok(())
     }
 
-    /// 轮询 socket 状态
+    /// Poll socket status
     pub fn poll(&self) -> NetResult<PollState> {
         match self.get_state() {
             STATE_CONNECTING => self.poll_connect(),
@@ -343,7 +343,7 @@ impl TcpSocket {
         }
     }
 
-    /// 设置 Nagle 算法
+    /// Set Nagle algorithm
     pub fn set_nagle_enabled(&self, enabled: bool) -> NetResult<()> {
         let handle = unsafe { self.handle.get().read() };
         if let Some(handle) = handle {
@@ -358,19 +358,19 @@ impl TcpSocket {
         }
     }
 
-    /// 获取 Nagle 算法状态
+    /// Get Nagle algorithm status
     pub fn nagle_enabled(&self) -> bool {
         let handle = unsafe { self.handle.get().read() };
         match handle {
             Some(handle) => network_stack()
                 .socket_set()
                 .with_socket::<tcp::Socket, _, _>(handle, |socket| socket.nagle_enabled()),
-            None => true, // 默认启用
+            None => true, // Default enabled
         }
     }
 }
 
-// 私有方法实现
+// Private method implementations
 impl TcpSocket {
     fn get_state(&self) -> u8 {
         self.state.load(Ordering::Acquire)
@@ -449,7 +449,7 @@ impl TcpSocket {
         use crate::stack::PortManager;
         static PORT_MANAGER: PortManager = PortManager::new();
         
-        for _ in 0..1000 { // 最多尝试 1000 次
+        for _ in 0..1000 { // Try at most 1000 times
             let port = PORT_MANAGER.next_ephemeral_port();
             if network_stack().listen_table().can_listen(port) {
                 return Ok(port);
@@ -467,7 +467,7 @@ impl TcpSocket {
                     State::SynSent => false,
                     State::Established => {
                         self.set_state(STATE_CONNECTED);
-                        debug!("TCP socket {}: 连接已建立到 {}", handle, socket.remote_endpoint().unwrap());
+                        debug!("TCP socket {}: connection established to {}", handle, socket.remote_endpoint().unwrap());
                         true
                     }
                     _ => {
@@ -538,7 +538,7 @@ impl Write for TcpSocket {
     }
 
     fn flush(&mut self) -> axerrno::AxResult {
-        Ok(()) // TCP 自动刷新
+        Ok(()) // TCP auto flush
     }
 }
 

@@ -1,6 +1,6 @@
-//! 网络设备适配器
+//! Network device adapters
 //!
-//! 为smoltcp提供设备抽象层，包括以太网设备和回环设备
+//! Provides device abstraction layer for smoltcp, including Ethernet and loopback devices
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -9,7 +9,7 @@ use axsync::Mutex;
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 
-/// 以太网设备适配器
+/// Ethernet device adapter
 pub struct EthernetDevice {
     inner: AxNetDevice,
     rx_buffer: Mutex<Vec<u8>>,
@@ -17,7 +17,7 @@ pub struct EthernetDevice {
 }
 
 impl EthernetDevice {
-    /// 创建新的以太网设备
+    /// Create new Ethernet device
     pub fn new(device: AxNetDevice) -> Self {
         Self {
             inner: device,
@@ -26,9 +26,9 @@ impl EthernetDevice {
         }
     }
 
-    /// 检查链路状态
+    /// Check link status
     pub fn is_link_up(&self) -> bool {
-        // 简化实现，假设链路总是up
+        // Simplified implementation, assume link is always up
         true
     }
 }
@@ -80,7 +80,7 @@ impl Device for EthernetDevice {
     }
 }
 
-/// 以太网接收令牌
+/// Ethernet receive token
 pub struct EthernetRxToken {
     buffer: Vec<u8>,
 }
@@ -94,7 +94,7 @@ impl RxToken for EthernetRxToken {
     }
 }
 
-/// 以太网发送令牌
+/// Ethernet transmit token
 pub struct EthernetTxToken<'a> {
     device: &'a mut AxNetDevice,
     buffer: &'a Mutex<Vec<u8>>,
@@ -117,20 +117,20 @@ impl<'a> TxToken for EthernetTxToken<'a> {
             tx_buf.len()
         );
         if let Err(e) = self.device.transmit(net_buf) {
-            warn!("发送数据包失败: {:?}", e);
+            warn!("Send Package Failed: {:?}", e);
         }
         
         result
     }
 }
 
-/// 回环设备适配器
+/// Loopback device adapter
 pub struct LoopbackDevice {
     queue: Mutex<Vec<Vec<u8>>>,
 }
 
 impl LoopbackDevice {
-    /// 创建新的回环设备
+    /// Create new loopback device
     pub fn new() -> Self {
         Self {
             queue: Mutex::new(Vec::new()),
@@ -170,7 +170,7 @@ impl Device for LoopbackDevice {
     }
 }
 
-/// 回环接收令牌
+/// Loopback receive token
 pub struct LoopbackRxToken {
     buffer: Vec<u8>,
 }
@@ -184,7 +184,7 @@ impl RxToken for LoopbackRxToken {
     }
 }
 
-/// 回环发送令牌
+/// Loopback transmit token
 pub struct LoopbackTxToken<'a> {
     queue: &'a Mutex<Vec<Vec<u8>>>,
 }
@@ -197,7 +197,7 @@ impl<'a> TxToken for LoopbackTxToken<'a> {
         let mut buffer = vec![0u8; len];
         let result = f(&mut buffer);
         
-        // 将数据包放入队列，实现回环
+        // Put packet into queue to implement loopback
         self.queue.lock().push(buffer);
         
         result

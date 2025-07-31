@@ -1,4 +1,4 @@
-//! 网络模块测试
+//! Network module tests
 
 #[cfg(test)]
 mod tests {

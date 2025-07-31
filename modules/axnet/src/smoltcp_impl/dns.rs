@@ -1,6 +1,6 @@
-//! DNS查询功能实现
+//! DNS query functionality implementation
 //!
-//! 提供域名解析服务，支持A记录和AAAA记录查询
+//! Provides domain name resolution service, supporting A and AAAA record queries
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -11,28 +11,28 @@ use smoltcp::wire::{DnsQueryType, IpAddress, Ipv4Address, Ipv6Address};
 use crate::error::{NetError, NetResult};
 use super::{network_stack, current_time, socket_set::SocketSetManager};
 
-/// DNS服务器配置
+/// DNS server configuration
 const DNS_TIMEOUT_MS: u64 = 5000;
 
-/// DNS查询实现
+/// DNS query implementation
 pub fn dns_query(domain: &str) -> NetResult<Vec<IpAddr>> {
-    debug!("DNS查询: {}", domain);
+    debug!("DNS query: {}", domain);
 
-    // 首先检查是否为IP地址
+    // First check if it's an IP address
     if let Ok(ip) = domain.parse::<IpAddr>() {
         return Ok(vec![ip]);
     }
 
-    // 检查本地hosts表
+    // Check local hosts table
     if let Some(ip) = check_local_hosts(domain) {
         return Ok(vec![ip]);
     }
 
-    // 执行真正的DNS查询
+    // Perform actual DNS query
     perform_dns_query(domain)
 }
 
-/// 检查本地hosts表
+/// Check local hosts table
 fn check_local_hosts(domain: &str) -> Option<IpAddr> {
     match domain {
         "localhost" => Some(IpAddr::V4([127, 0, 0, 1].into())),
@@ -42,21 +42,21 @@ fn check_local_hosts(domain: &str) -> Option<IpAddr> {
     }
 }
 
-/// 执行DNS查询
+/// Perform DNS query
 fn perform_dns_query(domain: &str) -> NetResult<Vec<IpAddr>> {
-    // 创建DNS socket
+    // Create DNS socket
     let dns_socket = SocketSetManager::new_dns_socket();
     let handle = network_stack().socket_set().add(dns_socket);
 
     let result = query_with_timeout(handle, domain, DNS_TIMEOUT_MS);
     
-    // 清理socket
+    // Clean up socket
     network_stack().socket_set().remove(handle);
     
     result
 }
 
-/// 带超时的DNS查询
+/// DNS query with timeout
 fn query_with_timeout(
     handle: smoltcp::iface::SocketHandle,
     domain: &str,
@@ -65,21 +65,21 @@ fn query_with_timeout(
     let start_time = current_time();
     let timeout = smoltcp::time::Duration::from_millis(timeout_ms);
 
-    // 启动A记录查询
+    // Start A record query
     let query_handle = network_stack()
         .socket_set()
         .with_socket_mut::<dns::Socket, _, _>(handle, |socket| {
             let interface_ctx = network_stack().eth_interface().context();
             interface_ctx.with_interface_mut(|interface| {
-                // 直接使用interface，不需要Context
+                // Use interface directly, no need for Context
                 // let mut ctx = interface.context();
-                // 暂时简化DNS查询实现
-                // TODO: 实现正确的DNS查询
+                // Temporarily simplified DNS query implementation
+                // TODO: Implement proper DNS query
                 Err(NetError::Unsupported)
             })
         })?;
 
-    // 轮询直到查询完成或超时
+    // Poll until query completes or times out
     loop {
         network_stack().poll_interfaces();
         
@@ -102,26 +102,26 @@ fn query_with_timeout(
                         }
                     }
                 }
-                debug!("DNS查询成功: {} -> {:?}", domain, ips);
+                debug!("DNS Query Success: {} -> {:?}", domain, ips);
                 return Ok(ips);
             }
             Err(dns::GetQueryResultError::Pending) => {
-                // 查询仍在进行中
+                // Query still in progress
                 if current_time() - start_time > timeout {
-                    warn!("DNS查询超时: {}", domain);
+                    warn!("DNS Query Timeout: {}", domain);
                     return Err(NetError::Timeout);
                 }
                 axtask::yield_now();
             }
             Err(_) => {
-                warn!("DNS查询失败: {}", domain);
+                warn!("DNS Query Failed: {}", domain);
                 return Err(NetError::HostUnreachable);
             }
         }
     }
 }
 
-/// 查询域名的IPv4地址
+/// Query domain's IPv4 addresses
 pub fn dns_query_ipv4(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv4Address>> {
     let addrs = dns_query(name)?;
     let ipv4_addrs = addrs
@@ -134,7 +134,7 @@ pub fn dns_query_ipv4(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv4Address>> 
     Ok(ipv4_addrs)
 }
 
-/// 查询域名的IPv6地址
+/// Query domain's IPv6 addresses
 pub fn dns_query_ipv6(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv6Address>> {
     let addrs = dns_query(name)?;
     let ipv6_addrs = addrs
@@ -147,7 +147,7 @@ pub fn dns_query_ipv6(name: &str) -> NetResult<Vec<smoltcp::wire::Ipv6Address>> 
     Ok(ipv6_addrs)
 }
 
-/// 查询域名的第一个IP地址
+/// Query domain's first IP address
 pub fn dns_query_first(name: &str) -> NetResult<IpAddr> {
     let addrs = dns_query(name)?;
     addrs.into_iter().next().ok_or(NetError::HostUnreachable)

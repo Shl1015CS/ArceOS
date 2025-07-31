@@ -1,4 +1,4 @@
-//! UDP Socket 实现
+//! UDP Socket implementation
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use axio::{PollState, Read, Write};
@@ -11,13 +11,13 @@ use crate::error::{NetError, NetResult};
 use crate::stack::{SocketAddr, addr_utils::*};
 use super::{network_stack, socket_set::SocketSetManager};
 
-/// UDP Socket 实现
+/// UDP Socket implementation
 /// 
-/// 提供 POSIX 风格的 UDP socket API，支持：
-/// - 数据报传输：`send_to`, `recv_from`
-/// - 连接模式：`connect`, `send`, `recv`
-/// - 地址绑定：`bind`
-/// - 非阻塞模式和地址重用
+/// Provides POSIX-style UDP socket API, supporting:
+/// - Datagram transmission: `send_to`, `recv_from`
+/// - Connected mode: `connect`, `send`, `recv`
+/// - Address binding: `bind`
+/// - Non-blocking mode and address reuse
 pub struct UdpSocket {
     handle: SocketHandle,
     local_addr: RwLock<Option<IpEndpoint>>,
@@ -27,7 +27,7 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
-    /// 创建新的 UDP socket
+    /// Create new UDP socket
     pub fn new() -> Self {
         let socket = SocketSetManager::new_udp_socket();
         let handle = network_stack().socket_set().add(socket);
@@ -41,7 +41,7 @@ impl UdpSocket {
         }
     }
 
-    /// 获取本地地址和端口
+    /// Get local address and port
     pub fn local_addr(&self) -> NetResult<SocketAddr> {
         self.local_addr
             .read()
@@ -50,32 +50,32 @@ impl UdpSocket {
             .ok_or(NetError::NotConnected)
     }
 
-    /// 获取远程地址和端口
+    /// Get remote address and port
     pub fn peer_addr(&self) -> NetResult<SocketAddr> {
         self.remote_endpoint().map(to_std_socket_addr)
     }
 
-    /// 检查是否为非阻塞模式
+    /// Check if in non-blocking mode
     pub fn is_nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Acquire)
     }
 
-    /// 设置非阻塞模式
+    /// Set non-blocking mode
     pub fn set_nonblocking(&self, nonblocking: bool) {
         self.nonblock.store(nonblocking, Ordering::Release);
     }
 
-    /// 检查是否启用地址重用
+    /// Check if address reuse is enabled
     pub fn is_reuse_addr(&self) -> bool {
         self.reuse_addr.load(Ordering::Acquire)
     }
 
-    /// 设置地址重用
+    /// Set address reuse
     pub fn set_reuse_addr(&self, reuse_addr: bool) {
         self.reuse_addr.store(reuse_addr, Ordering::Release);
     }
 
-    /// 设置 TTL (生存时间)
+    /// Set TTL (Time To Live)
     pub fn set_ttl(&self, ttl: u8) {
         network_stack()
             .socket_set()
@@ -84,7 +84,7 @@ impl UdpSocket {
             });
     }
 
-    /// 绑定到本地地址
+    /// Bind to local address
     pub fn bind(&self, mut local_addr: SocketAddr) -> NetResult<()> {
         let mut self_local_addr = self.local_addr.write();
 
@@ -106,7 +106,7 @@ impl UdpSocket {
             port: local_endpoint.port,
         };
 
-        // 检查地址冲突
+        // Check address conflict
         if !self.is_reuse_addr() {
             network_stack()
                 .socket_set()
@@ -123,25 +123,25 @@ impl UdpSocket {
             })?;
 
         *self_local_addr = Some(local_endpoint);
-        debug!("UDP socket {}: 绑定到 {}", self.handle, listen_endpoint);
+        debug!("UDP socket {}: bound to {}", self.handle, listen_endpoint);
         Ok(())
     }
 
-    /// 连接到远程地址
+    /// Connect to remote address
     pub fn connect(&self, remote_addr: SocketAddr) -> NetResult<()> {
         let mut self_peer_addr = self.peer_addr.write();
 
-        // 如果未绑定，自动绑定到未指定地址
+        // If not bound, automatically bind to unspecified address
         if self.local_addr.read().is_none() {
             self.bind(to_std_socket_addr(UNSPECIFIED_ENDPOINT))?;
         }
 
         *self_peer_addr = Some(from_std_socket_addr(remote_addr));
-        debug!("UDP socket {}: 连接到 {}", self.handle, remote_addr);
+        debug!("UDP socket {}: connected to {}", self.handle, remote_addr);
         Ok(())
     }
 
-    /// 发送数据到指定地址
+    /// Send data to specified address
     pub fn send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> NetResult<usize> {
         if remote_addr.port() == 0 || remote_addr.ip().is_unspecified() {
             return Err(NetError::InvalidInput);
@@ -150,7 +150,7 @@ impl UdpSocket {
         self.send_impl(buf, from_std_socket_addr(remote_addr))
     }
 
-    /// 从 socket 接收数据，返回数据长度和发送方地址
+    /// Receive data from socket, return data length and sender address
     pub fn recv_from(&self, buf: &mut [u8]) -> NetResult<(usize, SocketAddr)> {
         self.recv_impl(|socket| {
             socket
@@ -160,7 +160,7 @@ impl UdpSocket {
         })
     }
 
-    /// 窥视数据（不移除）
+    /// Peek data (without removing)
     pub fn peek_from(&self, buf: &mut [u8]) -> NetResult<(usize, SocketAddr)> {
         self.recv_impl(|socket| {
             socket
@@ -170,13 +170,13 @@ impl UdpSocket {
         })
     }
 
-    /// 发送数据到已连接的远程地址
+    /// Send data to connected remote address
     pub fn send(&self, buf: &[u8]) -> NetResult<usize> {
         let remote_endpoint = self.remote_endpoint()?;
         self.send_impl(buf, remote_endpoint)
     }
 
-    /// 从已连接的远程地址接收数据
+    /// Receive data from connected remote address
     pub fn recv(&self, buf: &mut [u8]) -> NetResult<usize> {
         let remote_endpoint = self.remote_endpoint()?;
         self.recv_impl(|socket| {
@@ -184,7 +184,7 @@ impl UdpSocket {
                 .recv_slice(buf)
                 .map_err(|_| NetError::Internal)?;
             
-            // 检查是否来自连接的远程地址
+            // Check if from connected remote address
             if !is_unspecified(remote_endpoint.addr) 
                 && remote_endpoint.addr != meta.endpoint.addr {
                 return Err(NetError::WouldBlock);
@@ -197,19 +197,19 @@ impl UdpSocket {
         })
     }
 
-    /// 关闭 socket
+    /// Close socket
     pub fn shutdown(&self) -> NetResult<()> {
         network_stack().poll_interfaces();
         network_stack()
             .socket_set()
             .with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-                debug!("UDP socket {}: 关闭", self.handle);
+                debug!("UDP socket {}: closing", self.handle);
                 socket.close();
             });
         Ok(())
     }
 
-    /// 轮询 socket 状态
+    /// Poll socket status
     pub fn poll(&self) -> NetResult<PollState> {
         if self.local_addr.read().is_none() {
             return Ok(PollState {
@@ -228,18 +228,18 @@ impl UdpSocket {
             })
     }
 
-    /// 使用 socket 执行操作（只读）
+    /// Execute operation with socket (read-only)
     pub fn with_socket<R>(&self, f: impl FnOnce(&udp::Socket) -> R) -> R {
         network_stack().socket_set().with_socket(self.handle, f)
     }
 
-    /// 使用 socket 执行操作（可变）
+    /// Execute operation with socket (mutable)
     pub fn with_socket_mut<R>(&self, f: impl FnOnce(&mut udp::Socket) -> R) -> R {
         network_stack().socket_set().with_socket_mut(self.handle, f)
     }
 }
 
-// 私有方法实现
+// Private method implementations
 impl UdpSocket {
     fn remote_endpoint(&self) -> NetResult<IpEndpoint> {
         self.peer_addr
@@ -253,7 +253,7 @@ impl UdpSocket {
         use crate::stack::PortManager;
         static PORT_MANAGER: PortManager = PortManager::new();
         
-        // UDP 端口分配比较简单，不需要检查监听表
+        // UDP port allocation is simpler, no need to check listen table
         Ok(PORT_MANAGER.next_ephemeral_port())
     }
 
@@ -337,7 +337,7 @@ impl Write for UdpSocket {
     }
 
     fn flush(&mut self) -> axerrno::AxResult {
-        Ok(()) // UDP 无需刷新
+        Ok(()) // UDP doesn't need flush
     }
 }
 

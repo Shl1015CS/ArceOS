@@ -1,6 +1,6 @@
-//! 网络接口实现
+//! Network interface implementation
 //!
-//! 提供以太网和回环接口的封装，管理网络数据包的收发
+//! Provides Ethernet and loopback interface wrappers, managing network packet transmission and reception
 
 use axdriver::prelude::*;
 use axsync::Mutex;
@@ -12,7 +12,7 @@ use crate::error::{NetError, NetResult};
 use super::device::{EthernetDevice, LoopbackDevice};
 use super::socket_set::SocketSetManager;
 
-/// 以太网接口封装
+/// Ethernet interface wrapper
 pub struct EthernetInterface {
     name: &'static str,
     interface: Mutex<Interface>,
@@ -20,7 +20,7 @@ pub struct EthernetInterface {
 }
 
 impl EthernetInterface {
-    /// 创建新的以太网接口
+    /// Create new Ethernet interface
     pub fn new(
         name: &'static str,
         net_dev: AxNetDevice,
@@ -39,12 +39,12 @@ impl EthernetInterface {
         })
     }
 
-    /// 获取接口名称
+    /// Get interface name
     pub fn name(&self) -> &'static str {
         self.name
     }
 
-    /// 获取以太网地址
+    /// Get Ethernet address
     pub fn ethernet_address(&self) -> EthernetAddress {
         if let HardwareAddress::Ethernet(addr) = self.interface.lock().hardware_addr() {
             addr
@@ -53,7 +53,7 @@ impl EthernetInterface {
         }
     }
 
-    /// 设置IP地址
+    /// Set IP address
     pub fn setup_ip_addr(&self, ip: IpAddress, prefix_len: u8) -> NetResult<()> {
         let cidr = IpCidr::new(ip, prefix_len);
         self.interface
@@ -65,7 +65,7 @@ impl EthernetInterface {
         Ok(())
     }
 
-    /// 设置网关
+    /// Set gateway
     pub fn setup_gateway(&self, gateway: IpAddress) -> NetResult<()> {
         match gateway {
             IpAddress::Ipv4(ipv4) => {
@@ -86,7 +86,7 @@ impl EthernetInterface {
         Ok(())
     }
 
-    /// 轮询接口，处理网络数据包
+    /// Poll interface, handle network packets
     pub fn poll(&self, timestamp: Instant, socket_set: &SocketSetManager) {
         let mut interface = self.interface.lock();
         let mut device = self.device.lock();
@@ -96,19 +96,19 @@ impl EthernetInterface {
         });
     }
 
-    /// 获取接口上下文（用于Socket操作）
+    /// Get interface context (for Socket operations)
     pub fn context(&self) -> InterfaceContext {
         InterfaceContext {
             interface: &self.interface,
         }
     }
 
-    /// 检查链路状态
+    /// Check link status
     pub fn is_link_up(&self) -> bool {
         self.device.lock().is_link_up()
     }
 
-    /// 获取当前IP地址
+    /// Get current IP address
     pub fn ip_addr(&self) -> Option<IpAddress> {
         self.interface
             .lock()
@@ -118,29 +118,29 @@ impl EthernetInterface {
             .map(|cidr| cidr.address())
     }
 
-    /// 获取网关地址
+    /// Get gateway address
     pub fn gateway(&self) -> Option<IpAddress> {
-        // 简化实现，暂时返回None
-        // TODO: 实现正确的网关获取逻辑
+        // Simplified implementation, return None for now
+        // TODO: Implement proper gateway retrieval logic
         None
     }
 }
 
-/// 回环接口封装
+/// Loopback interface wrapper
 pub struct LoopbackInterface {
     interface: Mutex<Interface>,
     device: Mutex<LoopbackDevice>,
 }
 
 impl LoopbackInterface {
-    /// 创建新的回环接口
+    /// Create new loopback interface
     pub fn new() -> NetResult<Self> {
         let mut device = LoopbackDevice::new();
         let config = Config::new(HardwareAddress::Ip);
 
         let mut interface = Interface::new(config, &mut device, super::current_time());
 
-        // 设置回环地址
+        // Set loopback addresses
         interface
             .update_ip_addrs(|ip_addrs| {
                 ip_addrs.clear();
@@ -154,7 +154,7 @@ impl LoopbackInterface {
         })
     }
 
-    /// 轮询回环接口
+    /// Poll loopback interface
     pub fn poll(&self, timestamp: Instant, socket_set: &SocketSetManager) {
         let mut interface = self.interface.lock();
         let mut device = self.device.lock();
@@ -164,32 +164,32 @@ impl LoopbackInterface {
         });
     }
 
-    /// 获取接口上下文
+    /// Get interface context
     pub fn context(&self) -> InterfaceContext {
         InterfaceContext {
             interface: &self.interface,
         }
     }
 
-    /// 加入多播组
+    /// Join multicast group
     pub fn join_multicast_group(
         &self,
         _multicast_addr: IpAddress,
         _timestamp: Instant,
     ) -> NetResult<()> {
-        // 简化实现，暂时返回成功
-        // TODO: 实现正确的多播组加入逻辑
+        // Simplified implementation, return success for now
+        // TODO: Implement proper multicast group join logic
         Ok(())
     }
 }
 
-/// 接口上下文，用于Socket操作
+/// Interface context for Socket operations
 pub struct InterfaceContext<'a> {
     interface: &'a Mutex<Interface>,
 }
 
 impl<'a> InterfaceContext<'a> {
-    /// 获取接口的可变引用
+    /// Get mutable reference to interface
     pub fn with_interface_mut<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut Interface) -> R,
@@ -197,7 +197,7 @@ impl<'a> InterfaceContext<'a> {
         f(&mut *self.interface.lock())
     }
 
-    /// 获取接口的不可变引用
+    /// Get immutable reference to interface
     pub fn with_interface<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Interface) -> R,
