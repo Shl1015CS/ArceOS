@@ -77,7 +77,6 @@ impl<M: RawMutex> File<M> {
 
     /// Queries metadata about the underlying file.
     pub fn metadata(&self) -> VfsResult<Metadata> {
-        self.access(FileFlags::READ)?;
         self.location.metadata()
     }
 
