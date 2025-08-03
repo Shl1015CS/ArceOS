@@ -23,7 +23,8 @@ pub fn resolve_path<M: RawMutex>(
         if target.is_empty() {
             return Err(VfsError::ENOENT);
         }
-        resolve_path(context, &target, follow_count, false)
+        let context = context.with_current_dir(location.parent().ok_or(VfsError::ENOENT)?)?;
+        resolve_path(&context, &target, follow_count, false)
     };
 
     let mut location = &context.current_dir;
