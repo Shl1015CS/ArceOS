@@ -34,3 +34,9 @@ pub fn framebuffer_info() -> DisplayInfo {
 pub fn framebuffer_flush() {
     MAIN_DISPLAY.lock().flush().unwrap();
 }
+
+pub fn get_main_display() -> &'static Mutex<AxDisplayDevice> {
+    MAIN_DISPLAY
+        .get()
+        .expect("Graphics subsystem not initialized")
+}
