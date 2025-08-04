@@ -50,6 +50,7 @@ pub fn open<M: RawMutex>(
     flags: FileFlags,
     create_mode: Option<u32>,
     create_user: Option<(u32, u32)>,
+    no_follow: bool,
 ) -> VfsResult<OpenResult<M>> {
     if !flags.validate() {
         return Err(VfsError::EINVAL);
@@ -57,7 +58,7 @@ pub fn open<M: RawMutex>(
     let path = path.as_ref();
     // TODO: 每一层的权限检查
     // 默认是当前目录
-    let (location, rest) = resolve_path_existed(context, path, &mut 0);
+    let (location, rest) = resolve_path_existed(context, path, &mut 0, no_follow)?;
     let file = if rest.is_empty() {
         // 如果路径解析完毕，说明是一个文件或目录，直接打开即可
         if flags.contains(FileFlags::CREATE | FileFlags::CREATE_NEW) {

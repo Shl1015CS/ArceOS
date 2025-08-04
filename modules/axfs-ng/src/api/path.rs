@@ -67,7 +67,21 @@ pub fn resolve_path_existed<'a, M: RawMutex>(
     context: &FsContext<M>,
     path: &'a Path,
     follow_count: &mut usize,
-) -> (Location<M>, &'a Path) {
+    no_follow: bool,
+) -> VfsResult<(Location<M>, &'a Path)> {
+    let mut follow_symlink = |location: &Location<M>| -> VfsResult<Location<M>> {
+        if *follow_count >= SYMLINKS_MAX {
+            return Err(VfsError::ELOOP);
+        }
+        *follow_count += 1;
+        let target = location.read_link()?;
+        if target.is_empty() {
+            return Err(VfsError::ENOENT);
+        }
+        let context = context.with_current_dir(location.parent().ok_or(VfsError::ENOENT)?)?;
+        resolve_path(&context, &target, follow_count, false)
+    };
+
     let mut location = &context.current_dir;
     let mut location_owned;
     let mut components = path.components();
@@ -90,16 +104,30 @@ pub fn resolve_path_existed<'a, M: RawMutex>(
                 }
             }
             Component::Normal(name) => {
-                if let Ok(new_location) = lookup_followed(context, location, name, follow_count) {
+                // 检查上次循环结束后的location是不是符号链接，如果是，则需要重新查找
+                let new_location = if location.node_type() == NodeType::Symlink {
+                    let real_location = follow_symlink(location)?;
+                    real_location.lookup_no_follow(name)
+                } else {
+                    location.lookup_no_follow(name)
+                };
+                if let Ok(new_location) = new_location {
+                    // 查找成功
                     location_owned = new_location;
                     &location_owned
                 } else {
-                    return (location.clone(), rest_path);
+                    // 如果查找失败，直接返回当前的location和剩余路径
+                    return Ok((location.clone(), rest_path));
                 }
             }
         };
     }
-    (location.clone(), "".as_ref())
+    let final_location = if !no_follow && location.node_type() == NodeType::Symlink {
+        follow_symlink(location)?
+    } else {
+        location.clone()
+    };
+    Ok((final_location, "".as_ref()))
 }
 
 /// 在指定的路径下查找文件或目录，追踪符号链接。
