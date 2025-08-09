@@ -107,6 +107,9 @@ pub fn on_timer_tick() {
     current_run_queue::<NoOp>().scheduler_timer_tick();
 }
 
+#[cfg(feature = "irq")]
+pub use crate::timers::get_irq_count;
+
 /// Adds the given task to the run queue, returns the task reference.
 pub fn spawn_task(task: TaskInner) -> AxTaskRef {
     let task_ref = task.into_arc();

@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use kernel_guard::NoOp;
 use lazyinit::LazyInit;
@@ -43,7 +43,14 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     })
 }
 
+static IRQ_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub fn get_irq_count() -> usize {
+    IRQ_COUNT.load(Ordering::Relaxed)
+}
+
 pub fn check_events() {
+    // increment IRQ count
+    IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     loop {
         let now = wall_time();
         let event = unsafe {
