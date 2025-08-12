@@ -113,8 +113,10 @@ impl GlobalAllocator {
                 let old_size = balloc.total_bytes();
                 let mut expand_size = old_size
                     .next_power_of_two()
+                    // for buddy allocator
+                    .max((layout.size() * 2).next_power_of_two())
                     .min(self.available_pages() / 3 * PAGE_SIZE)
-                    .max(layout.size());
+                    .max(layout.size().saturating_sub(balloc.available_bytes()));
                 expand_size = align_up(expand_size, PAGE_SIZE);
                 let heap_ptr = self.alloc_pages(expand_size / PAGE_SIZE, PAGE_SIZE)?;
                 debug!(
