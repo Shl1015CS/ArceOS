@@ -54,7 +54,7 @@ BLK ?= n
 NET ?= n
 GRAPHIC ?= n
 BUS ?= pci
-MEM ?= 128M
+MEM ?= 2G
 ACCEL ?=
 
 DISK_IMG ?= disk.img
@@ -179,6 +179,10 @@ justrun:
 	$(call run_qemu)
 
 debug: build
+	@echo $(OUT_ELF)
+	$(call run_qemu_debug)
+
+debug_with_gdb: build
 	$(call run_qemu_debug) &
 	sleep 1
 	$(GDB) $(OUT_ELF) \
