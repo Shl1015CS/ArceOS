@@ -46,7 +46,7 @@ pub unsafe fn sys_clock_gettime(clk: ctypes::clockid_t, ts: *mut ctypes::timespe
             CLOCK_MONOTONIC => axhal::time::monotonic_time().into(),
             _ => {
                 warn!("Called sys_clock_gettime for unsupported clock {}", clk);
-                return Err(LinuxError::EINVAL);
+                axhal::time::wall_time().into()
             }
         };
         unsafe { *ts = now };
