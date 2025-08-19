@@ -90,7 +90,7 @@ impl MappingBackend for Backend {
     ) -> bool {
         page_table
             .protect_region(start, size, new_flags, true)
-            .map(|tlb| tlb.ignore())
+            .map(|tlb| tlb.flush_all())
             .is_ok()
     }
 }

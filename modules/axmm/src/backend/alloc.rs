@@ -102,7 +102,10 @@ impl Backend {
                 for addr in iter {
                     if let Some(frame) = alloc_frame(true, align) {
                         if let Ok(tlb) = pt.map(addr, frame, align, flags) {
+                            #[cfg(not(target_arch = "loongarch64"))]
                             tlb.ignore(); // TLB flush on map is unnecessary, as there are no outdated mappings.
+                            #[cfg(target_arch = "loongarch64")]
+                            tlb.flush();
                         } else {
                             return false;
                         }
