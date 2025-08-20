@@ -7,13 +7,15 @@ use axhal::time::current_ticks;
 use axio::{PollState, Read, Write};
 use axsync::Mutex;
 
+use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
+use super::{SocketSetWrapper, LISTEN_TABLE, SOCKET_SET};
+use crate::buf::{Buf, BufMut, BufMutExt};
+use crate::{poll_interfaces, RecvFlags};
 use axtask::yield_now;
+use bitflags::bitflags;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp::{self, ConnectError, State};
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
-
-use super::addr::{from_core_sockaddr, into_core_sockaddr, is_unspecified, UNSPECIFIED_ENDPOINT};
-use super::{SocketSetWrapper, LISTEN_TABLE, SOCKET_SET};
 
 // State transitions:
 // CLOSED -(connect)-> BUSY -> CONNECTING -> CONNECTED -(shutdown)-> BUSY -> CLOSED
@@ -357,7 +359,7 @@ impl TcpSocket {
     }
 
     /// Receives data from the socket, stores it in the given buffer.
-    pub fn recv(&self, buf: &mut [u8]) -> AxResult<usize> {
+    pub fn recv(&self, buf: &mut impl BufMut, flags: RecvFlags) -> AxResult<usize> {
         if self.is_connecting() {
             return Err(AxError::WouldBlock);
         } else if !self.is_connected() {
@@ -369,11 +371,22 @@ impl TcpSocket {
         self.block_on(|| {
             SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
                 if socket.recv_queue() > 0 {
+                    debug!("recv queue: {}", socket.recv_queue());
                     // data available
-                    // TODO: use socket.recv(|buf| {...})
-                    let len = socket
-                        .recv_slice(buf)
-                        .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
+                    let len = if flags.contains(RecvFlags::PEEK) {
+                        socket.peek_slice(buf.chunk_mut())
+                    } else {
+                        socket.recv(|buffer| {
+                            // use
+                            // let result = buf.write(buffer);
+                            // let len = result.unwrap_or(0);
+                            // (len, result)
+                            debug!("recv buffer: {:?}", buffer.len());
+                            let len = buf.put(&mut &*buffer);
+                            (len, len)
+                        })
+                    }
+                    .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
                     Ok(len)
                 } else if !socket.is_active() {
                     // not open
@@ -431,7 +444,7 @@ impl TcpSocket {
     }
 
     /// Transmits data in the given buffer.
-    pub fn send(&self, buf: &[u8]) -> AxResult<usize> {
+    pub fn send(&self, buf: &mut impl Buf) -> AxResult<usize> {
         if self.is_connecting() {
             return Err(AxError::WouldBlock);
         } else if !self.is_connected() {
@@ -447,9 +460,12 @@ impl TcpSocket {
                     ax_err!(ConnectionReset, "socket send() failed")
                 } else if socket.can_send() {
                     // connected, and the tx buffer is not full
-                    // TODO: use socket.send(|buf| {...})
                     let len = socket
-                        .send_slice(buf)
+                        .send(|mut buffer| {
+                            let len = buffer.put(buf);
+                            debug!("send len: {}", len);
+                            (len, len)
+                        })
                         .map_err(|_| ax_err_type!(BadState, "socket send() failed"))?;
                     Ok(len)
                 } else {
@@ -462,6 +478,7 @@ impl TcpSocket {
 
     /// Whether the socket is readable or writable.
     pub fn poll(&self) -> AxResult<PollState> {
+        poll_interfaces();
         match self.get_state() {
             STATE_CONNECTING => self.poll_connect(),
             STATE_CONNECTED => self.poll_stream(),
@@ -677,9 +694,16 @@ impl TcpSocket {
             f()
         } else {
             loop {
+                debug!("before poll_interfaces");
                 SOCKET_SET.poll_interfaces();
+                debug!("after poll_interfaces");
                 match f() {
-                    Ok(t) => return Ok(t),
+                    Ok(t) => {
+                        debug!("before poll_interfaces a");
+                        SOCKET_SET.poll_interfaces();
+                        debug!("after poll_interfaces a");
+                        return Ok(t);
+                    }
                     Err(AxError::WouldBlock) => axtask::yield_now(),
                     Err(e) => return Err(e),
                 }
@@ -689,14 +713,14 @@ impl TcpSocket {
 }
 
 impl Read for TcpSocket {
-    fn read(&mut self, buf: &mut [u8]) -> AxResult<usize> {
-        self.recv(buf)
+    fn read(&mut self, mut buf: &mut [u8]) -> AxResult<usize> {
+        self.recv(&mut buf, RecvFlags::empty())
     }
 }
 
 impl Write for TcpSocket {
-    fn write(&mut self, buf: &[u8]) -> AxResult<usize> {
-        self.send(buf)
+    fn write(&mut self, mut buf: &[u8]) -> AxResult<usize> {
+        self.send(&mut buf)
     }
 
     fn flush(&mut self) -> AxResult {

@@ -27,6 +27,8 @@ pub use self::dns::dns_query;
 pub use self::tcp::TcpSocket;
 pub use self::udp::UdpSocket;
 pub use addr::{from_core_sockaddr, into_core_sockaddr};
+use bitflags::bitflags;
+
 #[allow(unused)]
 macro_rules! env_or_default {
     ($key:literal) => {
@@ -82,7 +84,9 @@ impl<'a> SocketSetWrapper<'a> {
     pub fn new_tcp_socket() -> socket::tcp::Socket<'a> {
         let tcp_rx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]);
         let tcp_tx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]);
-        socket::tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer)
+        let mut socket = socket::tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+        socket.set_ack_delay(None);
+        socket
     }
 
     pub fn new_udp_socket() -> socket::udp::Socket<'a> {
@@ -148,11 +152,12 @@ impl<'a> SocketSetWrapper<'a> {
     }
 
     pub fn poll_interfaces(&self) {
-        LOOPBACK.lock().poll(
-            Instant::from_micros_const((0 / NANOS_PER_MICROS) as i64),
-            LOOPBACK_DEV.lock().deref_mut(),
-            &mut self.0.lock(),
-        );
+        ETH0.poll(&self.0);
+        // LOOPBACK.lock().poll(
+        //     Instant::from_micros_const((0 / NANOS_PER_MICROS) as i64),
+        //     LOOPBACK_DEV.lock().deref_mut(),
+        //     &mut self.0.lock(),
+        // );
     }
 
     pub fn remove(&self, handle: SocketHandle) {
@@ -393,4 +398,11 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
 
     SOCKET_SET.init_by(SocketSetWrapper::new());
     LISTEN_TABLE.init_by(ListenTable::new());
+}
+
+bitflags! {
+    pub struct RecvFlags: usize {
+        const PEEK = 2;
+        const TRUNCATE = 32;
+    }
 }
