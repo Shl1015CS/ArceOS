@@ -17,7 +17,7 @@ use allocator::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use kspin::SpinNoIrq;
-use memory_addr::align_up;
+use memory_addr::{PAGE_SIZE_4K, align_up};
 
 const PAGE_SIZE: usize = 0x1000;
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
@@ -104,6 +104,14 @@ impl GlobalAllocator {
     /// memory, it asks the page allocator for more memory and adds it to the
     /// byte allocator.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
+        if layout.size() > 64 * 1024 * 1024 {
+            // If the layout size is larger than 64 MB, we assume it's a page
+            // allocation and deallocate it directly.
+            let size = layout.size().next_multiple_of(PAGE_SIZE);
+            return self
+                .alloc_pages(size / PAGE_SIZE, PAGE_SIZE)
+                .map(|ptr| unsafe { NonNull::new_unchecked(ptr as *mut u8) });
+        }
         // simple two-level allocator: if no heap memory, allocate from the page allocator.
         let mut balloc = self.balloc.lock();
         loop {
@@ -137,6 +145,12 @@ impl GlobalAllocator {
     ///
     /// [`alloc`]: GlobalAllocator::alloc
     pub fn dealloc(&self, pos: NonNull<u8>, layout: Layout) {
+        if layout.size() > 64 * 1024 * 1024 {
+            // If the layout size is larger than 64 MB, we assume it's a page
+            // allocation and deallocate it directly.
+            let size = layout.size().next_multiple_of(PAGE_SIZE);
+            return self.dealloc_pages(pos.as_ptr() as usize, size / PAGE_SIZE);
+        }
         self.balloc.lock().dealloc(pos, layout)
     }
 
