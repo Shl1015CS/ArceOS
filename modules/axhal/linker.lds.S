@@ -90,12 +90,12 @@ SECTIONS
 }
 
 SECTIONS {
-    linkme_IRQ : { *(linkme_IRQ) }
-    linkm2_IRQ : { *(linkm2_IRQ) }
-    linkme_PAGE_FAULT : { *(linkme_PAGE_FAULT) }
-    linkm2_PAGE_FAULT : { *(linkm2_PAGE_FAULT) }
-    linkme_SYSCALL : { *(linkme_SYSCALL) }
-    linkm2_SYSCALL : { *(linkm2_SYSCALL) }
+    linkme_IRQ : { KEEP(*(linkme_IRQ)) }
+    linkm2_IRQ : { KEEP(*(linkm2_IRQ)) }
+    linkme_PAGE_FAULT : { KEEP(*(linkme_PAGE_FAULT)) }
+    linkm2_PAGE_FAULT : { KEEP(*(linkm2_PAGE_FAULT)) }
+    linkme_SYSCALL : { KEEP(*(linkme_SYSCALL)) }
+    linkm2_SYSCALL : { KEEP(*(linkm2_SYSCALL)) }
     axns_resource : { *(axns_resource) }
 }
 INSERT AFTER .tbss;
