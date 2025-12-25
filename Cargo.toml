@@ -37,6 +37,7 @@ members = [
     "examples/std/httpserver",
     "examples/std/thread_test",
     "examples/std/io_test",
+    "examples/std/webdemo",
 ]
 
 [workspace.package]
